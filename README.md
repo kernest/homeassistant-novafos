@@ -114,6 +114,15 @@ This is how the manual method works:
 Data is delayed in the data warehouse.  Data validity will range from 24h to 5 days ago from today's midnight.
 This means the sensor data represents historical data and that the sensors presented by the integration have no current state (unknown).
 However all sensors are statistics sensors and can be shown using statistics cards, statistics graph and through apex-charts
+
+The integration also exposes the latest completed hourly interval as ordinary
+Home Assistant sensor states:
+
+* `sensor.novafos_water_hourly_consumption`
+* `sensor.novafos_heating_hourly_consumption` (when a heating meter is available)
+
+The `reading_start` attribute contains the start time of the interval. Historical
+hourly readings remain available through the statistics sensors below.
 like any other sensor with real-time data.
 
 This means we have a slightly different visualisation flow compared to other sensors.

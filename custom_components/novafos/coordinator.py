@@ -268,6 +268,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 name=None,
                 source=RECORDER_DOMAIN,
                 statistic_id=statistic_id,
+                unit_class=None,
                 unit_of_measurement=unit,
             )
             async_import_statistics(self.hass, metadata, statistics)
@@ -328,6 +329,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     name=None,
                     source=RECORDER_DOMAIN,
                     statistic_id=statistic_id,
+                    unit_class=None,
                     unit_of_measurement=unit,
                 )
                 async_import_statistics(self.hass, metadata, statistics)

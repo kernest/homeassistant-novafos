@@ -99,7 +99,15 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
               at the end of the year.
         """
         _LOGGER.debug(self.coordinator.data)
-        if (
+        if self.entity_description.key == "hourly":
+            readings = self.coordinator.data[0].get(
+                self.entity_description.sensor_type, []
+            )
+            if readings:
+                self._attrs = {"reading_start": readings[-1]["DateFrom"]}
+            else:
+                self._attrs = {}
+        elif (
             self.entity_description.key == "statistics"
             and self.coordinator.data[1] is not None
         ):
@@ -115,7 +123,11 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> StateType:
-        # State needs to be unknown as the data is in the past and not a current measurement.
-        # If a state is set, this will go to the statistics too and make things look funny.
-        # return self.coordinator.data[2]
+        """Return the latest completed hourly consumption reading."""
+        if self.entity_description.key == "hourly":
+            readings = self.coordinator.data[0].get(
+                self.entity_description.sensor_type, []
+            )
+            if readings:
+                return readings[-1]["Value"]
         return None

@@ -16,11 +16,18 @@ DOMAIN = "novafos"
 # Default name for sensor prefix texts (possibly other things)
 DEFAULT_NAME = "Novafos"
 
-# NOTE:
-#  All consumption data can be derived from the statistics sensor.
-#  The sensor will always have state "unknown" because data is only relevant in the past.
-#  Instead use the statistics charts and cards to get data out.
 WATER_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
+    NovafosSensorDescription(
+        sensor_type="water",
+        key="hourly",
+        name="Water hourly consumption",
+        entity_registry_enabled_default=True,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        suggested_display_precision=3,
+        device_class=SensorDeviceClass.WATER,
+        icon="mdi:water",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
     NovafosSensorDescription(
         sensor_type="water",
         key="statistics",
@@ -82,6 +89,17 @@ EXTRA_WATER_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
 )
 
 HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
+    NovafosSensorDescription(
+        sensor_type="heating",
+        key="hourly",
+        name="Heating hourly consumption",
+        entity_registry_enabled_default=True,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=3,
+        device_class=SensorDeviceClass.ENERGY,
+        icon="mdi:lightning-bolt-circle",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
     NovafosSensorDescription(
         sensor_type="heating",
         key="statistics",
