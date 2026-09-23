@@ -1,5 +1,8 @@
 # import pytest
+import pytest
 import requests
+
+from custom_components.novafos.pynovafos.novafos import HTTPFailed
 
 
 def test_get_customer_id_ok(caplog, mocker, novafos):
@@ -88,11 +91,8 @@ def test_get_customer_id_exception_on_no_id_field(caplog, mocker, novafos):
     }
     """
     mock_get.return_value = mock_response
-    try:
+    with pytest.raises(HTTPFailed):
         novafos._get_customer_id()
-        assert False
-    except KeyError:
-        assert True
 
 
 def test_get_customer_id_exception_on_no_number_field(caplog, mocker, novafos):
@@ -109,8 +109,5 @@ def test_get_customer_id_exception_on_no_number_field(caplog, mocker, novafos):
     }
     """
     mock_get.return_value = mock_response
-    try:
+    with pytest.raises(HTTPFailed):
         novafos._get_customer_id()
-        assert False
-    except KeyError:
-        assert True

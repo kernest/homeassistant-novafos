@@ -4,6 +4,19 @@
 
 The `novafos` component is a Home Assistant custom component for monitoring your water metering data from Novafos (via KMD Easy-Energy).
 
+The API client talks to KMD Easy-Energy rather than a NovaFos-specific data
+service. It can therefore also work with other utilities on the same platform,
+including Hillerød Forsyning, when supplied with a bearer token from that
+utility's KMD customer portal.
+
+## Optimized data import
+
+Historical hourly data is fetched in 31-day chunks. The original implementation
+made one request per meter per day, causing a first import to issue hundreds of
+sequential requests and appear to hang. Initial history is now limited to the
+documented 365 days, network calls have finite timeouts, and water/heating data
+remains isolated when an account has multiple meter types.
+
 ---
 # Installation
 ---

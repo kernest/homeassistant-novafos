@@ -137,13 +137,11 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     self.api.get_available_time_series_periods
                 )
 
-                one_year_back = dt.now().replace(
-                    year=dt.now().year - 1,
-                    month=1,
-                    day=1,
-                    hour=0,
-                    minute=0,
-                    second=0,
+                # Keep the documented one-year initial history limit.  The
+                # previous calculation started on 1 January of the previous
+                # year and could unexpectedly request almost two years.
+                one_year_back = (dt.now() - timedelta(days=365)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
                 )
 
                 # Don't go back further than the available data:

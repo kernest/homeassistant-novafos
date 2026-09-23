@@ -2,6 +2,7 @@
 import requests
 from datetime import datetime, timedelta
 import tests.utils
+from custom_components.novafos.pynovafos.novafos import Novafos
 
 
 # Test cases:
@@ -51,7 +52,7 @@ def test_get_statistics_single(mocker, novafos):
 
     mock_post.side_effect = [mock_response_1, mock_response_2]
 
-    assert novafos.get_statistics(from_date=None) is None
+    assert novafos.get_statistics(from_date=None) == {}
 
 
 # @pytest.mark.skip(reason="Skipped")
@@ -76,3 +77,40 @@ def test_statistics(mocker, data_regression, novafos) -> None:
     from_date = datetime.now() - timedelta(days=1)
     novafos.get_statistics(from_date=from_date)
     data_regression.check(novafos._meter_data)
+
+
+def test_statistics_uses_chunks_and_keeps_meter_types_separate(mocker) -> None:
+    api = Novafos(timezone="Europe/Copenhagen", chunk_days=31)
+    api._meter_data = {"water": [], "heating": []}
+    api._meter_data_extra = {"water": [], "heating": []}
+
+    def chunk_response(dateFrom, dateTo, zoomLevel):
+        extra = {
+            "Sum": 1.0,
+            "Avg": 1.0,
+            "Max": 1.0,
+            "Min": 1.0,
+            "LastValidDate": dateTo,
+        }
+        return [
+            {
+                "type": "water",
+                "Data": [{"DateFrom": dateFrom, "Value": 1.0}],
+                "Extra": extra,
+            },
+            {
+                "type": "heating",
+                "Data": [{"DateFrom": dateFrom, "Value": 2.0}],
+                "Extra": extra,
+            },
+        ]
+
+    fetch = mocker.patch.object(
+        api, "_get_all_consumption_timeseries", side_effect=chunk_response
+    )
+
+    api.get_statistics(from_date=datetime.now() - timedelta(days=65))
+
+    assert fetch.call_count == 3
+    assert [point["Value"] for point in api._meter_data["water"]] == [1.0] * 3
+    assert [point["Value"] for point in api._meter_data["heating"]] == [2.0] * 3

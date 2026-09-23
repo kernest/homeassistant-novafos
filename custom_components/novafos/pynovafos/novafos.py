@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from datetime import timedelta
-from unittest import result
 from zoneinfo import ZoneInfo
 import logging
 import json
@@ -28,9 +27,14 @@ class Novafos:
     Primary exported interface for KMD API wrapper.
     """
 
-    def __init__(self, timezone):
+    DEFAULT_TIMEOUT = (10, 60)
+    DEFAULT_CHUNK_DAYS = 31
+
+    def __init__(self, timezone, request_timeout=None, chunk_days=None):
         self._api_url = "https://easy-energy-plugin-api.kmd.dk"
         self.tz = ZoneInfo(timezone)
+        self._request_timeout = request_timeout or self.DEFAULT_TIMEOUT
+        self._chunk_days = chunk_days or self.DEFAULT_CHUNK_DAYS
 
         self._access_token = ""
         self._customer_id = ""
@@ -70,9 +74,9 @@ class Novafos:
                 len(access_token),
             )
             return False
+        # Never write the bearer token to Home Assistant's logs.
         _LOGGER.debug(
-            "Access token set to: '%s' at date: '%s'",
-            self._access_token,
+            "Access token accepted at date: '%s'",
             self._access_token_date_updated,
         )
 
@@ -96,10 +100,14 @@ class Novafos:
                 self._get_active_meters()
                 return True
             except LoginFailed as lf:
-                _LOGGER.error("Login failed during authenticate_using_access_token: %s", lf)
+                _LOGGER.error(
+                    "Login failed during authenticate_using_access_token: %s", lf
+                )
                 return False
             except HTTPFailed as hf:
-                _LOGGER.error("HTTP failure during authenticate_using_access_token: %s", hf)
+                _LOGGER.error(
+                    "HTTP failure during authenticate_using_access_token: %s", hf
+                )
                 return False
 
     def _get_customer_id(self):
@@ -111,9 +119,11 @@ class Novafos:
         url = f"{self._api_url}/api/profile/get"
 
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=self._request_timeout)
         except requests.exceptions.RequestException as req_err:
-            _LOGGER.error("Request error occurred while retrieving customer id: %s", req_err)
+            _LOGGER.error(
+                "Request error occurred while retrieving customer id: %s", req_err
+            )
             # Network or other request-level error
             raise HTTPFailed from req_err
 
@@ -129,7 +139,9 @@ class Novafos:
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as http_err:
-            _LOGGER.error("HTTP error occurred while retrieving customer id: %s", http_err)
+            _LOGGER.error(
+                "HTTP error occurred while retrieving customer id: %s", http_err
+            )
             raise HTTPFailed from http_err
         # response = requests.get(url, headers=headers)
         # self._print_json(response.json(), "Retrieved customer ID JSON response")
@@ -183,7 +195,17 @@ class Novafos:
 
         url = f"{self._api_url}/api/meter/customerActiveMeters"
 
-        response = requests.post(url, data=data, headers=headers)
+        try:
+            response = requests.post(
+                url,
+                data=data,
+                headers=headers,
+                timeout=self._request_timeout,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as req_err:
+            _LOGGER.error("Failed to retrieve active meters: %s", req_err)
+            raise HTTPFailed from req_err
         # NOTE: Failure may happen right here whenever the API is updated with new headers and what not.
         # self._print_json(response.json(), "Get active meters response")
 
@@ -245,7 +267,12 @@ class Novafos:
             "Authorization": self._access_token,
         }
         url = f"{self._api_url}/api/consumption/availableTimeSeriesPeriods"
-        response = requests.get(url, headers=headers)
+        try:
+            response = requests.get(url, headers=headers, timeout=self._request_timeout)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as req_err:
+            _LOGGER.error("Failed to retrieve available time periods: %s", req_err)
+            raise HTTPFailed from req_err
         result_json = response.json()
 
         # Enable logging DEBUG to see all returned data from the API:
@@ -359,7 +386,22 @@ class Novafos:
 
         url = f"{self._api_url}/api/consumption/consumptionTimeSeries"
 
-        response = requests.post(url, json=data, headers=headers)
+        try:
+            response = requests.post(
+                url,
+                json=data,
+                headers=headers,
+                timeout=self._request_timeout,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as req_err:
+            _LOGGER.error(
+                "Failed to retrieve consumption data for %s to %s: %s",
+                dateFrom,
+                dateTo,
+                req_err,
+            )
+            raise HTTPFailed from req_err
         result_json = response.json()
 
         # Enable logging DEBUG to see all returned data from the API:
@@ -405,6 +447,8 @@ class Novafos:
 
     def _local_to_utc(self, local_time):
         """Convert a local time to UTC time including timezone and summer(DST)/winter time offsets."""
+        if local_time.tzinfo is None:
+            local_time = local_time.replace(tzinfo=self.tz)
         return local_time.astimezone(ZoneInfo("UTC"))
         # TODO: Find out what is going on here.  If the system time is UTC, the lines below does what is correct.
         #       If the system time is CET or Europe/Copenhagen, the line above works.
@@ -443,40 +487,44 @@ class Novafos:
             hour=23, minute=59, second=59, microsecond=0
         )
         days_back = (end_date_input - from_date_input).days
-        duration = range(days_back)
         _LOGGER.debug(
             f"Statistics range to fetch: {from_date_input}-{end_date_input} | {days_back} day(s)"
         )
 
-        first_day = [True] * len(self._meter_data)
-        for day in duration:
-            # "DateFrom":"2024-03-31T22:00:00.000Z", "DateTo":"2024-04-02T21:59:59.999Z",  <- sommertid
-            # "DateFrom":"2024-10-27T23:00:00.000Z", "DateTo":"2024-10-28T22:59:59.999Z"   <- vintertid
-            now = from_date_input + timedelta(days=day)
-            dateFrom = self._utc_to_isostr(self._local_to_utc(now))
-            dateTo = self._utc_to_isostr(
-                self._local_to_utc(
-                    now.replace(hour=23, minute=59, second=59, microsecond=0)
-                )
+        # The old implementation made one API request per meter per day.  A
+        # first import could therefore require hundreds of sequential calls.
+        # KMD returns hourly points for a date range, so fetch bounded chunks.
+        current_date = from_date_input
+        end_date_exclusive = end_date_input.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        while current_date < end_date_exclusive:
+            next_date = min(
+                current_date + timedelta(days=self._chunk_days),
+                end_date_exclusive,
             )
-            _LOGGER.info(
-                f"Statistics fetch {days_back - day} day(s) back ({dateFrom} to {dateTo})"
-            )
+            chunk_end = next_date - timedelta(seconds=1)
+            dateFrom = self._utc_to_isostr(self._local_to_utc(current_date))
+            dateTo = self._utc_to_isostr(self._local_to_utc(chunk_end))
+            _LOGGER.info("Statistics fetch (%s to %s)", dateFrom, dateTo)
 
             time_series = self._get_all_consumption_timeseries(
                 dateFrom=dateFrom, dateTo=dateTo, zoomLevel=self._zoom_level["Hour"]
             )
 
-            for idx, series in enumerate(time_series):
-                if first_day[idx]:
-                    meter_type = series.pop("type")
-                    first_day[idx] = False
+            for series in time_series:
+                # Resolve the type for every chunk.  Retaining this value from
+                # the previous loop mixed water and heating data when more
+                # than one meter was active.
+                meter_type = series["type"]
                 if series["Data"]:
                     # If the dataset returned is not empty extend dataset
                     self._meter_data[meter_type].extend(series["Data"])
                     self._meter_data_extra[meter_type].append(series["Extra"])
 
-                # _LOGGER.debug(json.dumps(time_series, sort_keys = False, indent = 4))
+            current_date = next_date
+
+            # _LOGGER.debug(json.dumps(time_series, sort_keys = False, indent = 4))
         # Debug output only:
         _LOGGER.debug(f"Statistics data:\n{self._meter_data}")
         _LOGGER.debug(f"Statistics extra_data:\n{self._meter_data_extra}")
