@@ -21,6 +21,13 @@ def test_grouped_statistics_day(mocker, novafos):
     )
 
 
+def test_grouped_statistics_empty_data(novafos):
+    novafos._meter_data = {"water": []}
+
+    assert novafos.get_grouped_statistics("water", "day") == []
+    assert novafos.get_grouped_statistics("water", "week") == []
+
+
 # @pytest.mark.skip(reason="Skipped")
 def test_grouped_statistics_week(data_regression, novafos):
     novafos._meter_data = tests.utils.load_data_structure("meter_data_medium.json")

@@ -114,3 +114,43 @@ def test_statistics_uses_chunks_and_keeps_meter_types_separate(mocker) -> None:
     assert fetch.call_count == 3
     assert [point["Value"] for point in api._meter_data["water"]] == [1.0] * 3
     assert [point["Value"] for point in api._meter_data["heating"]] == [2.0] * 3
+
+
+def test_get_statistics_replaces_previous_snapshot(mocker) -> None:
+    """Repeated coordinator requests must not duplicate hourly points."""
+    api = Novafos(timezone="Europe/Copenhagen", chunk_days=31)
+    api._active_meters = [
+        {
+            "type": "water",
+            "InstallationId": 1,
+            "MeasurementPointId": 2,
+            "Unit": {"Id": 3},
+        }
+    ]
+    api._meter_data = {"water": [{"DateFrom": "old", "Value": 99.0}]}
+    api._meter_data_extra = {"water": [{"Sum": 99.0}]}
+    mocker.patch.object(
+        api,
+        "_get_all_consumption_timeseries",
+        return_value=[
+            {
+                "type": "water",
+                "Data": [{"DateFrom": "2026-09-22T00:00:00", "Value": 0.1}],
+                "Extra": {
+                    "Sum": 0.1,
+                    "Avg": 0.1,
+                    "Min": 0.1,
+                    "Max": 0.1,
+                    "LastValidDate": "2026-09-22T00:59:59",
+                },
+            }
+        ],
+    )
+
+    from_date = datetime.now() - timedelta(days=1)
+    first = api.get_statistics(from_date=from_date)
+    second = api.get_statistics(from_date=from_date)
+
+    expected = {"water": [{"DateFrom": "2026-09-22T00:00:00", "Value": 0.1}]}
+    assert first == expected
+    assert second == expected

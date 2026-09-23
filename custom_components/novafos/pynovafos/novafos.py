@@ -481,6 +481,17 @@ class Novafos:
             # If no date, just return - no default behaviour
             return {}
 
+        # Each call is a fresh snapshot. The coordinator can request statistics
+        # more than once during one refresh (once per meter type), and retaining
+        # the previous call's points duplicated every hour. Besides inflating
+        # consumption, that made grouped statistics reject otherwise complete
+        # days because they contained 48 rather than 24 samples.
+        meter_types = set(self._meter_data) | {
+            meter["type"] for meter in self._active_meters
+        }
+        self._meter_data = {meter_type: [] for meter_type in meter_types}
+        self._meter_data_extra = {meter_type: [] for meter_type in meter_types}
+
         # Calculate date range to process - clean time settings too
         from_date_input = from_date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_date_input = datetime.now().replace(
@@ -634,6 +645,9 @@ class Novafos:
                 daily_sums.append((date, daily_sum))
                 # _LOGGER.debug(daily_sums[-1])
 
+        if not daily_sums:
+            return []
+
         # Handle the first day
         curr_date, curr_sum = daily_sums[0]
         curr_sum = round(curr_sum, 3)
@@ -725,6 +739,9 @@ class Novafos:
         grouping_sums = []
 
         daily_stats = self.group_by_day(meter_type)
+        if not daily_stats:
+            return []
+
         if grouping == "day":
             return daily_stats
 

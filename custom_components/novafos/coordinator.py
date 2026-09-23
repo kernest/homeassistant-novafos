@@ -291,7 +291,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     grouping,
                 )
 
-                dataset = self.api.get_grouped_statistics("water", grouping)
+                dataset = self.api.get_grouped_statistics(meter_type, grouping)
                 statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics_{grouping}"
                 if meter_type == "water":
                     unit = UnitOfVolume.CUBIC_METERS
