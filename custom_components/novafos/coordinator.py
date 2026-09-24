@@ -201,6 +201,22 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         # most KMD history was never imported. A version migration explicitly
         # requests a complete rebuild. A new installation with no statistics
         # also starts at KMD's earliest available timestamp.
+        # The Energy dashboard statistic was added later; an existing install
+        # needs one full import to give it the complete history too.
+        for meter_device in meter_devices:
+            meter_type = meter_device["type"]
+            if last_statistics[meter_type]:
+                last_statistics[meter_type] = await get_instance(
+                    self.hass
+                ).async_add_executor_job(
+                    get_last_statistics,
+                    self.hass,
+                    1,
+                    f"{DOMAIN}:{meter_type}_consumption",
+                    True,
+                    set(),
+                )
+
         if not full_history and (
             migration_requested
             or any(not last_statistics[meter["type"]] for meter in meter_devices)
@@ -344,11 +360,24 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 unit_of_measurement=unit,
             )
             async_import_statistics(self.hass, metadata, statistics)
-            # Keep the entity state aligned with the manually imported
-            # recorder sum.  Publishing the raw hourly value here would make
-            # recorder calculate incorrect long-term statistics, while a
-            # cumulative value is safe and makes the entity eligible for the
-            # Energy dashboard.
+            # The same series as an external statistic for the Energy
+            # dashboard.  Recorder never compiles external statistics, so
+            # nothing but this import writes to it.  The sensor.* statistic
+            # above is kept for charts that need an entity id.
+            async_add_external_statistics(
+                self.hass,
+                StatisticMetaData(
+                    mean_type=StatisticMeanType.NONE,
+                    has_sum=True,
+                    name=f"Novafos {meter_type} consumption",
+                    source=DOMAIN,
+                    statistic_id=f"{DOMAIN}:{meter_type}_consumption",
+                    unit_class=unit_class,
+                    unit_of_measurement=unit,
+                ),
+                statistics,
+            )
+            # Shown as an attribute on the statistics sensor.
             self.cumulative_totals[meter_type] = _sum
             await self._import_cost_statistics(
                 meter_type, statistics, fetch_start, full_history, meter_year_data

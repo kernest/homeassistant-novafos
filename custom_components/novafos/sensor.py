@@ -140,6 +140,11 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
             )
             if year_data:
                 self._attrs["year_total"] = year_data[-1]["Value"]
+            total = self.coordinator.cumulative_totals.get(
+                self.entity_description.sensor_type
+            )
+            if total is not None:
+                self._attrs["cumulative_total"] = total
         #     self._attrs["last_valid_date"] = self.coordinator.data[self.entity_description.sensor_type][self.entity_description.key]["LastValidDate"]
         else:
             self._attrs = {}
@@ -149,7 +154,14 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> StateType:
-        """Return the latest hourly reading or cumulative recorder total."""
+        """Return the latest hourly reading.
+
+        The statistics sensors deliberately have no state.  Their long-term
+        statistics are imported from KMD; a state would make recorder write
+        its own rows into the same statistic, which produced large negative
+        hours after a history import.  The imported total is exposed as the
+        cumulative_total attribute instead.
+        """
         if self.coordinator.data is None:
             return None
         if self.entity_description.key == "hourly":
@@ -158,8 +170,4 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
             )
             if readings:
                 return readings[-1]["Value"]
-        elif self.entity_description.key == "statistics":
-            return self.coordinator.cumulative_totals.get(
-                self.entity_description.sensor_type
-            )
         return None

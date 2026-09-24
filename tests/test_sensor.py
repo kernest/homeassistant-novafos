@@ -76,14 +76,16 @@ def test_statistics_sensor_clears_missing_year_total():
     assert sensor.extra_state_attributes == {}
 
 
-def test_statistics_sensor_exposes_imported_cumulative_total():
+def test_statistics_sensor_has_no_state_but_exposes_total_attribute():
+    """A state would make recorder write rows into the imported statistic."""
     sensor = make_sensor(
         ({"water": []}, {"water": {"Data": []}}),
         WATER_SENSOR_TYPES[1],
         {"water": 123.456},
     )
 
-    assert sensor.native_value == 123.456
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes == {"cumulative_total": 123.456}
 
 
 def test_meter_unit_follows_kmd_unit_for_heating():
