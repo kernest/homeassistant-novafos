@@ -138,7 +138,7 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> StateType:
-        """Return the latest completed hourly consumption reading."""
+        """Return the latest hourly reading or cumulative recorder total."""
         if self.coordinator.data is None:
             return None
         if self.entity_description.key == "hourly":
@@ -147,4 +147,8 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
             )
             if readings:
                 return readings[-1]["Value"]
+        elif self.entity_description.key == "statistics":
+            return self.coordinator.cumulative_totals.get(
+                self.entity_description.sensor_type
+            )
         return None

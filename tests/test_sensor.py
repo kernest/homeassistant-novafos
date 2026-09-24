@@ -10,9 +10,11 @@ from custom_components.novafos.const import (
 from custom_components.novafos.sensor import NovafosWaterSensor
 
 
-def make_sensor(data, description=WATER_SENSOR_TYPES[0]):
+def make_sensor(data, description=WATER_SENSOR_TYPES[0], cumulative_totals=None):
     sensor = object.__new__(NovafosWaterSensor)
-    sensor.coordinator = SimpleNamespace(data=data)
+    sensor.coordinator = SimpleNamespace(
+        data=data, cumulative_totals=cumulative_totals or {}
+    )
     sensor.entity_description = description
     sensor._attrs = {}
     return sensor
@@ -72,3 +74,13 @@ def test_statistics_sensor_clears_missing_year_total():
     sensor._attrs = {"year_total": 42.0}
 
     assert sensor.extra_state_attributes == {}
+
+
+def test_statistics_sensor_exposes_imported_cumulative_total():
+    sensor = make_sensor(
+        ({"water": []}, {"water": {"Data": []}}),
+        WATER_SENSOR_TYPES[1],
+        {"water": 123.456},
+    )
+
+    assert sensor.native_value == 123.456

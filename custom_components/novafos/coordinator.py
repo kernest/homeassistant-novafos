@@ -57,6 +57,10 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         self.entry = entry
         # Attribute data for the sensors
         self.attrib_data = {"year_total": None}
+        # Latest cumulative sums imported into recorder.  The corresponding
+        # sensor entities expose these values so Home Assistant's Energy
+        # dashboard can validate and select them.
+        self.cumulative_totals: dict[str, float] = {}
         # Need local version here to enable updating via action service calls
         self.access_token = (
             self.entry.options["access_token"]
@@ -282,9 +286,12 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 unit_of_measurement=unit,
             )
             async_import_statistics(self.hass, metadata, statistics)
-
-            # Could return last state for a sensor - but the sensor state ruins the statistics.
-            # return statistics[-1]['state']
+            # Keep the entity state aligned with the manually imported
+            # recorder sum.  Publishing the raw hourly value here would make
+            # recorder calculate incorrect long-term statistics, while a
+            # cumulative value is safe and makes the entity eligible for the
+            # Energy dashboard.
+            self.cumulative_totals[meter_type] = _sum
 
     async def _insert_grouped_statistics(
         self, grouping=("day", "week", "month", "year"), debug=False
