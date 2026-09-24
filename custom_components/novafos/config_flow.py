@@ -50,7 +50,7 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for novafos."""
 
-    VERSION = 4
+    VERSION = 5
     MINOR_VERSION = 0
 
     data: dict[str, Any] | None

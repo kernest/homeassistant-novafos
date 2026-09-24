@@ -14,7 +14,13 @@ from datetime import datetime as dt
 from datetime import timedelta
 
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    HISTORY_RECONCILIATION_KEY,
+    RECONCILIATION_TOLERANCE_ABS,
+    RECONCILIATION_TOLERANCE_REL,
+    STATISTICS_LOOKBACK_DAYS,
+)
 from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN, get_instance
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -61,6 +67,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         # sensor entities expose these values so Home Assistant's Energy
         # dashboard can validate and select them.
         self.cumulative_totals: dict[str, float] = {}
+        # Set once an automatic discrepancy reconciliation has run, so a
+        # persistent mismatch cannot trigger a full import on every refresh.
+        self._auto_reconciled = False
         # Need local version here to enable updating via action service calls
         self.access_token = (
             self.entry.options["access_token"]
@@ -101,7 +110,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     self.api.get_year_data
                 )
                 # last_state = await self._insert_statistics(debug=debug)
-                await self._insert_statistics(debug=debug)
+                await self._insert_statistics(meter_year_data, debug=debug)
                 if self.entry.data["use_grouped_sensors"]:
                     await self._insert_grouped_statistics(debug=debug)
                 data = (self.api._meter_data, meter_year_data)  # , last_state)
@@ -121,14 +130,72 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Returning from Coordinator with data: %s", data)
         return data
 
-    async def _insert_statistics(self, debug) -> None:
+    async def _insert_statistics(
+        self, meter_year_data, debug, force_full_history=False
+    ) -> None:
         """Update statistics when data is returned"""
+        meter_devices = self.api.get_meter_types()
+        migration_requested = bool(
+            self.entry.data.get(HISTORY_RECONCILIATION_KEY, False)
+        )
+        force_full_history = force_full_history or migration_requested
+
+        last_statistics = {}
+        for meter_device in meter_devices:
+            meter_type = meter_device["type"]
+            statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics"
+            last_statistics[meter_type] = await get_instance(
+                self.hass
+            ).async_add_executor_job(
+                get_last_statistics, self.hass, 1, statistic_id, True, set()
+            )
+
+        # An old integration could leave recent recorder-generated rows while
+        # most KMD history was never imported. A version migration explicitly
+        # requests a complete rebuild. A new installation with no statistics
+        # also starts at KMD's earliest available timestamp.
+        full_history = force_full_history or any(
+            not last_statistics[meter["type"]] for meter in meter_devices
+        )
+        if full_history:
+            min_date = await self.hass.async_add_executor_job(
+                self.api.get_available_time_series_periods
+            )
+            fetch_start = min_date or (dt.now() - timedelta(days=365))
+            fetch_start = fetch_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            _LOGGER.info("Reconciling all available KMD history since %s", fetch_start)
+        else:
+            fetch_start = (dt.now() - timedelta(days=STATISTICS_LOOKBACK_DAYS)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            _LOGGER.debug(
+                "Refreshing the last %s days of KMD history since %s",
+                STATISTICS_LOOKBACK_DAYS,
+                fetch_start,
+            )
+
+        if debug:
+            data = self.api._meter_data
+        else:
+            # get_statistics retrieves all active meters, so call it only once.
+            data = await self.hass.async_add_executor_job(
+                self.api.get_statistics, fetch_start
+            )
+
+        year_start = dt_util.now().replace(
+            month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        mismatched_meters = []
+
         # Iterate over water/heating
         # _get_meter_types returns:
         #      [{'type': 'water', 'InstallationId': 12345678, 'MeasurementPointId': 23456789, 'Unit': {'Id': 11111, 'Name': 'm³', 'Description': 'Vand', 'Decimals': 0, 'Order': 1}}]
-        for meter_device in self.api.get_meter_types():
+        for meter_device in meter_devices:
             meter_type = meter_device["type"]
             _LOGGER.debug("Retrieving statistics data for %s meter.", meter_type)
+            # Cumulative sum just before 1 January, when it falls inside the
+            # imported window.  Otherwise it is read from recorder below.
+            sum_before_year = None
 
             statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics"
             if meter_type == "water":
@@ -136,92 +203,29 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             else:
                 unit = UnitOfEnergy.KILO_WATT_HOUR
 
-            # TODO: Find actual last statistics where sum is not zero??
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics, self.hass, 1, statistic_id, True, set()
-            )
-            # Returns: last_stats = defaultdict(<class 'list'>, {'sensor.novafos_water_statistics': [{'start': 1735948800.0, 'end': 1735952400.0}]})
-            _LOGGER.debug("Last statistics (raw): %s", last_stats)
-            if not last_stats:
-                # First time we insert 365 days of data (if available)
-                min_date = await self.hass.async_add_executor_job(
-                    self.api.get_available_time_series_periods
-                )
-
-                # Keep the documented one-year initial history limit.  The
-                # previous calculation started on 1 January of the previous
-                # year and could unexpectedly request almost two years.
-                one_year_back = (dt.now() - timedelta(days=365)).replace(
-                    hour=0, minute=0, second=0, microsecond=0
-                )
-
-                # Don't go back further than the available data:
-                if min_date is not None and min_date > one_year_back:
-                    one_year_back = min_date
-
-                _LOGGER.debug(
-                    "No last statistics detected - retrieving data since %s. Your earliest data is from %s. This could take a while.",
-                    one_year_back,
-                    min_date,
-                )
-                if debug:
-                    data = self.api._meter_data
-                else:
-                    data = await self.hass.async_add_executor_job(
-                        self.api.get_statistics, one_year_back
-                    )
+            _LOGGER.debug("Last statistics (raw): %s", last_statistics[meter_type])
+            if full_history:
                 _sum = 0.0
             else:
-                # Fetch data this many days back
-                delta_days = 1
-                # Fetch data since last statistics updated
-                start = dt.fromtimestamp(
-                    last_stats[statistic_id][0]["start"]
-                ) - timedelta(days=delta_days)
-                end = dt.fromtimestamp(last_stats[statistic_id][0]["end"])
-                _LOGGER.debug(f"Last statistics: {start}-{end}")
-                # TODO: Retrieve data fixed 10 days before last statistics update - could be set to just get since the last data point.
-                # start = dt.fromtimestamp(last_stats[statistic_id][0]['end']) # end of last statistics point, asking for this gives no data points.
-                # Retrieve stored statistics one day further back because this is where the starting sum comes from.
-                stat = await get_instance(self.hass).async_add_executor_job(
-                    statistics_during_period,
-                    self.hass,
-                    start - timedelta(days=1),
-                    None,
-                    {statistic_id},
-                    "hour",
-                    None,
-                    {"sum", "max", "min", "mean"},
+                # Anchor the rolling replacement window to the last cumulative
+                # sum immediately before it. Selecting the first row from an
+                # open-ended query used an old sum and corrupted later imports.
+                # fetch_start is naive local time; recorder needs it aware.
+                anchor_sum = await self._sum_before(
+                    statistic_id,
+                    fetch_start.replace(
+                        tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
+                    ),
                 )
-                # Returns: defaultdict(<class 'list'>, {'sensor.novafos_water_statistics': [{'start': 1736031600.0, 'end': 1736035200.0, 'sum': 134.73000000000002}]})
-                _LOGGER.debug(f"Statistics in period: {stat}")
-
-                if debug:
-                    data = self.api._meter_data
+                _LOGGER.debug("Cumulative anchor before %s: %s", fetch_start, anchor_sum)
+                if anchor_sum is not None:
+                    _sum = anchor_sum
                 else:
-                    data = await self.hass.async_add_executor_job(
-                        self.api.get_statistics, start
-                    )
-                if statistic_id in stat:
-                    _sum = cast(float, stat[statistic_id][0]["sum"])
-                    _max = cast(float, stat[statistic_id][0]["max"])
-                    _min = cast(float, stat[statistic_id][0]["min"])
-                    _mean = cast(float, stat[statistic_id][0]["mean"])
-                else:
-                    # For some reason the latest statistics has nothing? Panic and get data 1 year back again!
-                    # one_year_back = dt.now().replace(year=dt.now().year-1, month=1, day=1, hour=0, minute=0, second=0)
-                    # Or just get data since the start of the year:
-                    one_year_back = dt.now().replace(
-                        year=dt.now().year, month=1, day=1, hour=0, minute=0, second=0
-                    )
                     _LOGGER.warning(
-                        "No last statistics detected - this is unexpected - retrieving data since %s.",
-                        one_year_back,
+                        "No cumulative anchor found before %s for %s; rebuilding this window from zero",
+                        fetch_start,
+                        meter_type,
                     )
-                    data = await self.hass.async_add_executor_job(
-                        self.api.get_statistics, one_year_back
-                    )
-                    # Need to reset sum to 0.0 because we don't know the offset any more.
                     _sum = 0.0
 
             if not data.get(meter_type):
@@ -243,6 +247,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 from_time = dt_util.parse_datetime(f"{val['DateFrom']}").replace(
                     tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
                 )
+                if sum_before_year is None and from_time >= year_start:
+                    sum_before_year = _sum
                 _sum += val["Value"]
                 _max = last_value if val["Value"] < last_value else val["Value"]
                 _min = last_value if val["Value"] >= last_value else val["Value"]
@@ -293,6 +299,88 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             # Energy dashboard.
             self.cumulative_totals[meter_type] = _sum
 
+            kmd_year_total = self._kmd_year_total(meter_year_data, meter_type)
+            if kmd_year_total is None:
+                continue
+            first_imported = dt_util.parse_datetime(
+                f"{data[meter_type][0]['DateFrom']}"
+            ).replace(tzinfo=dt_util.get_time_zone(self.hass.config.time_zone))
+            if first_imported >= year_start:
+                # The window starts after 1 January: the sum before the year
+                # comes from rows recorder already holds.
+                sum_before_year = await self._sum_before(statistic_id, year_start)
+            ha_year_total = _sum - (sum_before_year or 0.0)
+            tolerance = max(
+                RECONCILIATION_TOLERANCE_ABS,
+                abs(kmd_year_total) * RECONCILIATION_TOLERANCE_REL,
+            )
+            _LOGGER.debug(
+                "Year-to-date %s: Home Assistant %.3f, KMD %.3f",
+                meter_type,
+                ha_year_total,
+                kmd_year_total,
+            )
+            if abs(ha_year_total - kmd_year_total) > tolerance:
+                mismatched_meters.append((meter_type, ha_year_total, kmd_year_total))
+
+        if mismatched_meters:
+            details = ", ".join(
+                f"{meter_type}: Home Assistant {ha:.3f} vs KMD {kmd:.3f}"
+                for meter_type, ha, kmd in mismatched_meters
+            )
+            if not full_history and not self._auto_reconciled:
+                # Only this in-memory flag stops a repeat, so a persistent
+                # mismatch costs at most one extra full import per HA start.
+                self._auto_reconciled = True
+                _LOGGER.warning(
+                    "Year-to-date totals differ from KMD (%s); running a full history reconciliation",
+                    details,
+                )
+                await self._insert_statistics(
+                    meter_year_data, debug, force_full_history=True
+                )
+                return
+            _LOGGER.warning(
+                "Year-to-date totals still differ from KMD after reconciliation (%s)",
+                details,
+            )
+
+        if migration_requested:
+            # Persist completion only after every meter was processed without
+            # raising. This makes the expensive all-history import one-time,
+            # while failed attempts are retried safely on the next refresh.
+            entry_data = dict(self.entry.data)
+            entry_data.pop(HISTORY_RECONCILIATION_KEY, None)
+            self.hass.config_entries.async_update_entry(self.entry, data=entry_data)
+
+    @staticmethod
+    def _kmd_year_total(meter_year_data, meter_type) -> float | None:
+        """Return KMD's total for the current year, or None if unavailable."""
+        year_prefix = str(dt.now().year)
+        rows = (meter_year_data or {}).get(meter_type, {}).get("Data", [])
+        values = [
+            row["Value"]
+            for row in rows
+            if row.get("Value") is not None
+            and str(row.get("DateFrom", "")).startswith(year_prefix)
+        ]
+        return sum(values) if values else None
+
+    async def _sum_before(self, statistic_id, point) -> float | None:
+        """Return the recorder's cumulative sum in the hour before point."""
+        stat = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            point - timedelta(days=1),
+            point,
+            {statistic_id},
+            "hour",
+            None,
+            {"sum"},
+        )
+        rows = stat.get(statistic_id, [])
+        return cast(float, rows[-1]["sum"]) if rows else None
+
     async def _insert_grouped_statistics(
         self, grouping=("day", "week", "month", "year"), debug=False
     ) -> None:
@@ -301,16 +389,16 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         # _get_meter_types returns:
         #      [{'type': 'water', 'InstallationId': 11223344, 'MeasurementPointId': 33445566, 'Unit': {'Id': 10319, 'Name': 'm³', 'Description': 'Vand', 'Decimals': 0, 'Order': 1}}]
         for meter_device in self.api.get_meter_types():
-            for grouping in grouping:
+            for period in grouping:
                 meter_type = meter_device["type"]
                 _LOGGER.debug(
                     "Generating grouped statistics data for %s meter for %s.",
                     meter_type,
-                    grouping,
+                    period,
                 )
 
-                dataset = self.api.get_grouped_statistics(meter_type, grouping)
-                statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics_{grouping}"
+                dataset = self.api.get_grouped_statistics(meter_type, period)
+                statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics_{period}"
                 if meter_type == "water":
                     unit = UnitOfVolume.CUBIC_METERS
                 else:

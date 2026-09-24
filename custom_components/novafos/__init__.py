@@ -9,7 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, HISTORY_RECONCILIATION_KEY
 
 # The Novafos integration - not on PyPi, just bundled here.
 # Contrary to:
@@ -146,5 +146,13 @@ async def async_migrate_entry(hass, config_entry: ConfigEntry) -> bool:
         )
 
         _LOGGER.info("Migration to version %s successful", config_entry.version)
+
+    if config_entry.version == 4:
+        data = {**config_entry.data, HISTORY_RECONCILIATION_KEY: True}
+        hass.config_entries.async_update_entry(config_entry, data=data, version=5)
+        _LOGGER.info(
+            "Migration to version %s successful; a full KMD history reconciliation is scheduled",
+            config_entry.version,
+        )
 
     return True
