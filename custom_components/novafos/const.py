@@ -29,6 +29,46 @@ HISTORY_RECONCILIATION_KEY = "reconcile_full_history"
 RECONCILIATION_TOLERANCE_ABS = 0.5
 RECONCILIATION_TOLERANCE_REL = 0.02
 
+# KMD reports each meter's unit.  District heating is billed in kWh, MWh, GJ
+# or m³ of hot water depending on the utility, so it cannot be assumed.
+# Unit name -> (Home Assistant unit, recorder unit class, energy device class?)
+_KMD_UNITS: Final = {
+    "m³": (UnitOfVolume.CUBIC_METERS, "volume", False),
+    "m3": (UnitOfVolume.CUBIC_METERS, "volume", False),
+    "kwh": (UnitOfEnergy.KILO_WATT_HOUR, "energy", True),
+    "mwh": (UnitOfEnergy.MEGA_WATT_HOUR, "energy", True),
+    "gj": (UnitOfEnergy.GIGA_JOULE, "energy", True),
+}
+
+
+def meter_unit(meter_device: dict) -> tuple[str, str, SensorDeviceClass | None]:
+    """Return (unit, unit class, device class) for a KMD meter."""
+    name = str((meter_device.get("Unit") or {}).get("Name", "")).strip()
+    unit, unit_class, is_energy = _KMD_UNITS.get(name.lower(), (None, None, None))
+    if meter_device.get("type") == "water":
+        return UnitOfVolume.CUBIC_METERS, "volume", SensorDeviceClass.WATER
+    if unit is None:
+        # Unknown or missing unit: keep the historical default.
+        return UnitOfEnergy.KILO_WATT_HOUR, "energy", SensorDeviceClass.ENERGY
+    if is_energy:
+        return unit, unit_class, SensorDeviceClass.ENERGY
+    # Heating measured as a volume of hot water.
+    return unit, unit_class, SensorDeviceClass.VOLUME
+
+
+# Optional static price per unit (for example DKK per m³), per meter type.
+# The options dialog edits the current year's price; prices are kept per year
+# so a new price never reprices hours from earlier years.  0 disables it.
+def price_option(meter_type: str) -> str:
+    """Return the options key of the price field in the options dialog."""
+    return f"{meter_type}_price"
+
+
+def prices_option(meter_type: str) -> str:
+    """Return the options key holding the {year: price} mapping."""
+    return f"{meter_type}_prices"
+
+
 # Default name for sensor prefix texts (possibly other things)
 DEFAULT_NAME = "Novafos"
 

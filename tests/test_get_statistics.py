@@ -79,41 +79,89 @@ def test_statistics(mocker, data_regression, novafos) -> None:
     data_regression.check(novafos._meter_data)
 
 
-def test_statistics_uses_chunks_and_keeps_meter_types_separate(mocker) -> None:
+def _hourly_response(dateFrom, dateTo, max_hours=None):
+    """Build a KMD-like response with one point per hour in the UTC range."""
+    start = datetime.fromisoformat(dateFrom.replace("Z", "+00:00"))
+    stop = datetime.fromisoformat(dateTo.replace("Z", "+00:00"))
+    hours = []
+    point = start
+    while point < stop and (max_hours is None or len(hours) < max_hours):
+        hours.append(point.isoformat())
+        point += timedelta(hours=1)
+    return [
+        {
+            "type": meter_type,
+            "Data": [{"DateFrom": hour, "Value": value} for hour in hours],
+            "Extra": {
+                "Sum": value * len(hours),
+                "Avg": value,
+                "Max": value,
+                "Min": value,
+                "LastValidDate": dateTo,
+            },
+        }
+        for meter_type, value in (("water", 1.0), ("heating", 2.0))
+    ]
+
+
+def _zero_after_first_day(dateFrom, dateTo):
+    """KMD returning every hour, but zeros after the first day."""
+    series = _hourly_response(dateFrom, dateTo)
+    for meter in series:
+        for index, point in enumerate(meter["Data"]):
+            if index >= 24:
+                point["Value"] = 0.0
+        meter["Extra"]["Sum"] = len(meter["Data"]) * (
+            1.0 if meter["type"] == "water" else 2.0
+        )
+    return series
+
+
+def _chunk_api():
     api = Novafos(timezone="Europe/Copenhagen", chunk_days=31)
     api._meter_data = {"water": [], "heating": []}
     api._meter_data_extra = {"water": [], "heating": []}
+    return api
 
-    def chunk_response(dateFrom, dateTo, zoomLevel):
-        extra = {
-            "Sum": 1.0,
-            "Avg": 1.0,
-            "Max": 1.0,
-            "Min": 1.0,
-            "LastValidDate": dateTo,
-        }
-        return [
-            {
-                "type": "water",
-                "Data": [{"DateFrom": dateFrom, "Value": 1.0}],
-                "Extra": extra,
-            },
-            {
-                "type": "heating",
-                "Data": [{"DateFrom": dateFrom, "Value": 2.0}],
-                "Extra": extra,
-            },
-        ]
 
+def test_statistics_uses_chunks_and_keeps_meter_types_separate(mocker) -> None:
+    api = _chunk_api()
     fetch = mocker.patch.object(
-        api, "_get_all_consumption_timeseries", side_effect=chunk_response
+        api,
+        "_get_all_consumption_timeseries",
+        side_effect=lambda dateFrom, dateTo, zoomLevel: _hourly_response(
+            dateFrom, dateTo
+        ),
     )
 
     api.get_statistics(from_date=datetime.now() - timedelta(days=65))
 
     assert fetch.call_count == 3
-    assert [point["Value"] for point in api._meter_data["water"]] == [1.0] * 3
-    assert [point["Value"] for point in api._meter_data["heating"]] == [2.0] * 3
+    assert {point["Value"] for point in api._meter_data["water"]} == {1.0}
+    assert {point["Value"] for point in api._meter_data["heating"]} == {2.0}
+    # 65 days of hours, give or take a daylight saving time change.
+    assert abs(len(api._meter_data["water"]) - 65 * 24) <= 1
+
+
+def test_statistics_falls_back_to_daily_when_kmd_truncates(mocker) -> None:
+    """KMD returning one day per multi-day request must not lose history."""
+    api = _chunk_api()
+    fetch = mocker.patch.object(
+        api,
+        "_get_all_consumption_timeseries",
+        side_effect=lambda dateFrom, dateTo, zoomLevel: _hourly_response(
+            dateFrom, dateTo, max_hours=24
+        ),
+    )
+
+    api.get_statistics(from_date=datetime.now() - timedelta(days=65))
+
+    assert abs(len(api._meter_data["water"]) - 65 * 24) <= 1
+    assert abs(len(api._meter_data["heating"]) - 65 * 24) <= 1
+    dates = [point["DateFrom"] for point in api._meter_data["water"]]
+    assert len(dates) == len(set(dates))
+    # One truncated chunk, its 31 daily re-fetches, then 34 daily requests.
+    assert fetch.call_count == 1 + 31 + 34
 
 
 def test_get_statistics_replaces_previous_snapshot(mocker) -> None:
@@ -154,3 +202,21 @@ def test_get_statistics_replaces_previous_snapshot(mocker) -> None:
     expected = {"water": [{"DateFrom": "2026-09-22T00:00:00", "Value": 0.1}]}
     assert first == expected
     assert second == expected
+
+
+def test_statistics_falls_back_when_hourly_values_miss_the_total(mocker) -> None:
+    """Hourly zeros that disagree with KMD's own total trigger daily fetches."""
+    api = _chunk_api()
+    mocker.patch.object(
+        api,
+        "_get_all_consumption_timeseries",
+        side_effect=lambda dateFrom, dateTo, zoomLevel: _zero_after_first_day(
+            dateFrom, dateTo
+        ),
+    )
+
+    api.get_statistics(from_date=datetime.now() - timedelta(days=65))
+
+    water = api._meter_data["water"]
+    assert abs(len(water) - 65 * 24) <= 1
+    assert all(point["Value"] == 1.0 for point in water)

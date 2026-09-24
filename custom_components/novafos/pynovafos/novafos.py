@@ -28,7 +28,10 @@ class Novafos:
     """
 
     DEFAULT_TIMEOUT = (10, 60)
-    DEFAULT_CHUNK_DAYS = 31
+    # KMD's hourly endpoint has returned readings only for the first day of a
+    # multi-day range, with zeros for the rest and a range total that matches
+    # those zeros.  One day per request is the only reliable choice.
+    DEFAULT_CHUNK_DAYS = 1
 
     def __init__(self, timezone, request_timeout=None, chunk_days=None):
         self._api_url = "https://easy-energy-plugin-api.kmd.dk"
@@ -514,24 +517,40 @@ class Novafos:
 
         # The old implementation made one API request per meter per day.  A
         # first import could therefore require hundreds of sequential calls.
-        # KMD returns hourly points for a date range, so fetch bounded chunks.
+        # Fetch bounded chunks instead, but verify each chunk: KMD can return
+        # far fewer hourly points than a multi-day range asks for.  A short
+        # chunk is re-fetched one day at a time, and when that recovers hours
+        # the chunk missed, chunking is abandoned for the rest of this call.
         current_date = from_date_input
         end_date_exclusive = end_date_input.replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        use_chunks = self._chunk_days > 1
         while current_date < end_date_exclusive:
-            next_date = min(
-                current_date + timedelta(days=self._chunk_days),
-                end_date_exclusive,
-            )
-            chunk_end = next_date - timedelta(seconds=1)
-            dateFrom = self._utc_to_isostr(self._local_to_utc(current_date))
-            dateTo = self._utc_to_isostr(self._local_to_utc(chunk_end))
-            _LOGGER.info("Statistics fetch (%s to %s)", dateFrom, dateTo)
+            step = timedelta(days=self._chunk_days if use_chunks else 1)
+            next_date = min(current_date + step, end_date_exclusive)
+            time_series = self._fetch_hourly_range(current_date, next_date)
 
-            time_series = self._get_all_consumption_timeseries(
-                dateFrom=dateFrom, dateTo=dateTo, zoomLevel=self._zoom_level["Hour"]
-            )
+            if next_date - current_date > timedelta(days=1) and self._is_truncated(
+                time_series, current_date, next_date
+            ):
+                daily_series = []
+                day = current_date
+                while day < next_date:
+                    daily_series.extend(
+                        self._fetch_hourly_range(
+                            day, min(day + timedelta(days=1), next_date)
+                        )
+                    )
+                    day += timedelta(days=1)
+                if self._covered(daily_series) > self._covered(time_series):
+                    _LOGGER.info(
+                        "KMD returned incomplete hourly data for a %s-day range; "
+                        "fetching one day per request",
+                        (next_date - current_date).days,
+                    )
+                    use_chunks = False
+                time_series = daily_series
 
             for series in time_series:
                 # Resolve the type for every chunk.  Retaining this value from
@@ -562,6 +581,44 @@ class Novafos:
         #  { 'water': [{'DateFrom: <date>, 'Value': <float>}, ...],
         #    'heating': [{'DateFrom: <date>, 'Value': <float>}, ...],}
         return self._meter_data
+
+    def _fetch_hourly_range(self, start, stop):
+        """Fetch hourly data for all meters from local start up to local stop."""
+        dateFrom = self._utc_to_isostr(self._local_to_utc(start))
+        dateTo = self._utc_to_isostr(self._local_to_utc(stop - timedelta(seconds=1)))
+        _LOGGER.info("Statistics fetch (%s to %s)", dateFrom, dateTo)
+        return self._get_all_consumption_timeseries(
+            dateFrom=dateFrom, dateTo=dateTo, zoomLevel=self._zoom_level["Hour"]
+        )
+
+    @staticmethod
+    def _covered(time_series):
+        """Return (points, consumption) returned, for comparing fetches."""
+        return (
+            round(sum(p["Value"] or 0 for s in time_series for p in s["Data"]), 3),
+            sum(len(series["Data"]) for series in time_series),
+        )
+
+    @staticmethod
+    def _is_truncated(time_series, start, stop):
+        """Return True if a meter's hourly data does not cover the range.
+
+        KMD may return fewer hours than requested, or return every hour but
+        with zeros after the first day.  The second case is only visible by
+        comparing the hourly values with the range total KMD reports.
+        """
+        # Allow one hour of slack for the daylight saving time change.
+        expected = (stop - start).total_seconds() / 3600 - 1
+        for series in time_series:
+            if len(series["Data"]) < expected:
+                return True
+            total = series.get("Extra", {}).get("Sum")
+            if total is None:
+                continue
+            hourly = sum(point["Value"] or 0 for point in series["Data"])
+            if abs(hourly - total) > max(0.001, abs(total) * 0.01):
+                return True
+        return False
 
     def get_year_data(self):
         """

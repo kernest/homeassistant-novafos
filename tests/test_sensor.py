@@ -84,3 +84,24 @@ def test_statistics_sensor_exposes_imported_cumulative_total():
     )
 
     assert sensor.native_value == 123.456
+
+
+def test_meter_unit_follows_kmd_unit_for_heating():
+    from homeassistant.components.sensor import SensorDeviceClass
+
+    from custom_components.novafos.const import meter_unit
+
+    def heating(name):
+        return meter_unit({"type": "heating", "Unit": {"Name": name}})
+
+    assert heating("MWh") == ("MWh", "energy", SensorDeviceClass.ENERGY)
+    assert heating("kWh") == ("kWh", "energy", SensorDeviceClass.ENERGY)
+    assert heating("GJ") == ("GJ", "energy", SensorDeviceClass.ENERGY)
+    assert heating("m³") == ("m³", "volume", SensorDeviceClass.VOLUME)
+    # Unknown units keep the previous default.
+    assert heating("?") == ("kWh", "energy", SensorDeviceClass.ENERGY)
+    assert meter_unit({"type": "water", "Unit": {"Name": "m³"}}) == (
+        "m³",
+        "volume",
+        SensorDeviceClass.WATER,
+    )

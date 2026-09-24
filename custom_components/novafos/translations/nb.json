@@ -13,7 +13,7 @@
                 "data": {
                     "name": "Sensornavn Præfix",
                     "use_grouped_sensors": "Brug ekstra statistiksensorer til dag, uge, måned og år"
-                    }
+                }
             },
             "step_2": {
                 "data": {
@@ -26,9 +26,11 @@
         "step": {
             "init": {
                 "data": {
-                    "access_token": "Indsæt adgangstoken til opsætning eller opdatering af sensorer"
+                    "access_token": "Indsæt adgangstoken (lad feltet være tomt for at beholde det nuværende)",
+                    "water_price": "Vandpris pr. m³ fra i år (0 = fjern årets pris)",
+                    "heating_price": "Varmepris pr. enhed fra i år (0 = fjern årets pris)"
                 }
             }
         }
-    }    
+    }
 }

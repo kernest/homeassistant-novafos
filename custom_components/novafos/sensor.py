@@ -20,6 +20,7 @@ from .const import (
     HEATING_SENSOR_TYPES,
     EXTRA_WATER_SENSOR_TYPES,
     EXTRA_HEATING_SENSOR_TYPES,
+    meter_unit,
 )
 
 from .model import NovafosSensorDescription
@@ -91,6 +92,16 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = (
             f"{name.lower()}-{description.sensor_type}-{description.key}"
         )
+
+        # Use the unit KMD reports for this meter; heating may be kWh, MWh,
+        # GJ or m³.  The recorder statistics are imported with the same unit.
+        for meter in coordinator.api.get_meter_types():
+            if meter["type"] == description.sensor_type:
+                unit, _, device_class = meter_unit(meter)
+                self._attr_native_unit_of_measurement = unit
+                if description.device_class is not None:
+                    self._attr_device_class = device_class
+                break
 
         # Note: Data is stored in self.coordinator.data
 

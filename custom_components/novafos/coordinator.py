@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import HomeAssistantError
 
+import asyncio
 from datetime import datetime as dt
 from datetime import timedelta
 
@@ -20,6 +21,9 @@ from .const import (
     RECONCILIATION_TOLERANCE_ABS,
     RECONCILIATION_TOLERANCE_REL,
     STATISTICS_LOOKBACK_DAYS,
+    meter_unit,
+    price_option,
+    prices_option,
 )
 from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN, get_instance
 from homeassistant.components.recorder.models import (
@@ -31,9 +35,9 @@ from homeassistant.components.recorder.statistics import (
     get_last_statistics,
     statistics_during_period,
     async_import_statistics,
+    async_add_external_statistics,
 )
 from homeassistant.util import dt as dt_util
-from homeassistant.const import UnitOfVolume, UnitOfEnergy
 from typing import cast
 
 # If debugging, use pre-seeded data:
@@ -70,6 +74,14 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         # Set once an automatic discrepancy reconciliation has run, so a
         # persistent mismatch cannot trigger a full import on every refresh.
         self._auto_reconciled = False
+        # Same for the one full import that creates the cost history.
+        self._cost_reconciled = False
+        # The full history import makes one KMD request per day and meter and
+        # can take minutes, longer than Home Assistant allows setup to block.
+        # It runs as a background task; the lock keeps it and regular
+        # refreshes from sharing the API client's data at the same time.
+        self._full_history_task: asyncio.Task | None = None
+        self._import_lock = asyncio.Lock()
         # Need local version here to enable updating via action service calls
         self.access_token = (
             self.entry.options["access_token"]
@@ -110,10 +122,11 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     self.api.get_year_data
                 )
                 # last_state = await self._insert_statistics(debug=debug)
-                await self._insert_statistics(meter_year_data, debug=debug)
-                if self.entry.data["use_grouped_sensors"]:
-                    await self._insert_grouped_statistics(debug=debug)
-                data = (self.api._meter_data, meter_year_data)  # , last_state)
+                async with self._import_lock:
+                    await self._insert_statistics(meter_year_data, debug=debug)
+                    if self.entry.data["use_grouped_sensors"]:
+                        await self._insert_grouped_statistics(debug=debug)
+                    data = (self.api._meter_data, meter_year_data)  # , last_state)
             except Exception as ex:
                 _LOGGER.exception("Error while updating Novafos data")
                 raise UpdateFailed(f"The service is unavailable: {ex}") from ex
@@ -130,15 +143,49 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Returning from Coordinator with data: %s", data)
         return data
 
+    def _schedule_full_history(self, meter_year_data) -> None:
+        """Start the full history import in the background, once at a time."""
+        if self._full_history_task and not self._full_history_task.done():
+            return
+        self._full_history_task = self.entry.async_create_background_task(
+            self.hass,
+            self._run_full_history(meter_year_data),
+            "novafos_full_history_reconciliation",
+        )
+
+    async def _run_full_history(self, meter_year_data) -> None:
+        """Import all available KMD history and publish the result."""
+        try:
+            async with self._import_lock:
+                await self._insert_statistics(
+                    meter_year_data, debug=False, full_history=True
+                )
+                if self.entry.data["use_grouped_sensors"]:
+                    await self._insert_grouped_statistics(debug=False)
+                data = (self.api._meter_data, meter_year_data)
+            self.async_set_updated_data(data)
+            _LOGGER.info("Full KMD history reconciliation finished")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception(
+                "Full KMD history reconciliation failed; it is retried on the next refresh"
+            )
+            self._auto_reconciled = False
+
     async def _insert_statistics(
-        self, meter_year_data, debug, force_full_history=False
+        self, meter_year_data, debug, full_history=False
     ) -> None:
-        """Update statistics when data is returned"""
+        """Update statistics when data is returned.
+
+        A regular refresh imports the rolling window and, when a full import
+        is needed, schedules it in the background.  full_history=True is that
+        background import.
+        """
         meter_devices = self.api.get_meter_types()
         migration_requested = bool(
             self.entry.data.get(HISTORY_RECONCILIATION_KEY, False)
         )
-        force_full_history = force_full_history or migration_requested
 
         last_statistics = {}
         for meter_device in meter_devices:
@@ -154,9 +201,13 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         # most KMD history was never imported. A version migration explicitly
         # requests a complete rebuild. A new installation with no statistics
         # also starts at KMD's earliest available timestamp.
-        full_history = force_full_history or any(
-            not last_statistics[meter["type"]] for meter in meter_devices
-        )
+        if not full_history and (
+            migration_requested
+            or any(not last_statistics[meter["type"]] for meter in meter_devices)
+        ):
+            _LOGGER.info("Scheduling a full KMD history import in the background")
+            self._schedule_full_history(meter_year_data)
+
         if full_history:
             min_date = await self.hass.async_add_executor_job(
                 self.api.get_available_time_series_periods
@@ -186,6 +237,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             month=1, day=1, hour=0, minute=0, second=0, microsecond=0
         )
         mismatched_meters = []
+        coverage = {}
 
         # Iterate over water/heating
         # _get_meter_types returns:
@@ -198,10 +250,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             sum_before_year = None
 
             statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics"
-            if meter_type == "water":
-                unit = UnitOfVolume.CUBIC_METERS
-            else:
-                unit = UnitOfEnergy.KILO_WATT_HOUR
+            unit, unit_class, _ = meter_unit(meter_device)
 
             _LOGGER.debug("Last statistics (raw): %s", last_statistics[meter_type])
             if full_history:
@@ -283,12 +332,15 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             # Apexchart does not understand the domain:statistic noation, so we'll use an internal sensor instead.
             # Update the sensor statistics.  Only the hourly one is needed as the sensor can then aggregate data itself.
             metadata = StatisticMetaData(
-                mean_type=StatisticMeanType.ARITHMETIC,
+                # These entities have state_class total, for which Home
+                # Assistant expects no mean.  An arithmetic mean here made
+                # recorder report "The mean type has changed".
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 name=None,
                 source=RECORDER_DOMAIN,
                 statistic_id=statistic_id,
-                unit_class=None,
+                unit_class=unit_class,
                 unit_of_measurement=unit,
             )
             async_import_statistics(self.hass, metadata, statistics)
@@ -298,6 +350,21 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             # cumulative value is safe and makes the entity eligible for the
             # Energy dashboard.
             self.cumulative_totals[meter_type] = _sum
+            await self._import_cost_statistics(
+                meter_type, statistics, fetch_start, full_history, meter_year_data
+            )
+
+            points = data[meter_type]
+            nonzero = [p["DateFrom"] for p in points if p["Value"]]
+            nonzero_days = sorted({date[:10] for date in nonzero})
+            coverage[meter_type] = (
+                f"{len(points)} hourly points {points[0]['DateFrom']} to "
+                f"{points[-1]['DateFrom']} summing "
+                f"{sum(p['Value'] or 0 for p in points):.3f}, {len(nonzero)} non-zero"
+                f" on {len(nonzero_days)} day(s)"
+                + (f": {', '.join(nonzero_days[:12])}" if nonzero_days else "")
+                + (" ..." if len(nonzero_days) > 12 else "")
+            )
 
             kmd_year_total = self._kmd_year_total(meter_year_data, meter_type)
             if kmd_year_total is None:
@@ -305,9 +372,11 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             first_imported = dt_util.parse_datetime(
                 f"{data[meter_type][0]['DateFrom']}"
             ).replace(tzinfo=dt_util.get_time_zone(self.hass.config.time_zone))
-            if first_imported >= year_start:
-                # The window starts after 1 January: the sum before the year
-                # comes from rows recorder already holds.
+            if not full_history and first_imported > year_start:
+                # A rolling window that starts after 1 January: the sum before
+                # the year comes from rows recorder already holds.  A full
+                # import restarts the sum at zero, so older recorder rows must
+                # not be used; the in-memory value above is correct there.
                 sum_before_year = await self._sum_before(statistic_id, year_start)
             ha_year_total = _sum - (sum_before_year or 0.0)
             tolerance = max(
@@ -326,6 +395,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         if mismatched_meters:
             details = ", ".join(
                 f"{meter_type}: Home Assistant {ha:.3f} vs KMD {kmd:.3f}"
+                f" [{coverage[meter_type]}]"
                 for meter_type, ha, kmd in mismatched_meters
             )
             if not full_history and not self._auto_reconciled:
@@ -333,25 +403,103 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 # mismatch costs at most one extra full import per HA start.
                 self._auto_reconciled = True
                 _LOGGER.warning(
-                    "Year-to-date totals differ from KMD (%s); running a full history reconciliation",
+                    "Year-to-date totals differ from KMD (%s); running a full history reconciliation in the background",
                     details,
                 )
-                await self._insert_statistics(
-                    meter_year_data, debug, force_full_history=True
+                self._schedule_full_history(meter_year_data)
+            elif full_history:
+                _LOGGER.warning(
+                    "Year-to-date totals still differ from KMD after reconciliation (%s)",
+                    details,
                 )
-                return
-            _LOGGER.warning(
-                "Year-to-date totals still differ from KMD after reconciliation (%s)",
-                details,
-            )
 
-        if migration_requested:
+        if full_history and migration_requested:
             # Persist completion only after every meter was processed without
             # raising. This makes the expensive all-history import one-time,
             # while failed attempts are retried safely on the next refresh.
             entry_data = dict(self.entry.data)
             entry_data.pop(HISTORY_RECONCILIATION_KEY, None)
             self.hass.config_entries.async_update_entry(self.entry, data=entry_data)
+
+    def _prices(self, meter_type) -> dict[int, float]:
+        """Return the configured price per year for a meter type."""
+        raw = self.entry.options.get(prices_option(meter_type))
+        if not raw:
+            # A single price saved before prices were kept per year.
+            legacy = self.entry.options.get(price_option(meter_type))
+            raw = {str(dt.now().year): legacy} if legacy else {}
+        prices = {}
+        for year, price in raw.items():
+            try:
+                if float(price) > 0:
+                    prices[int(year)] = float(price)
+            except (TypeError, ValueError):
+                continue
+        return prices
+
+    @staticmethod
+    def _price_for_year(prices: dict[int, float], year: int) -> float:
+        """Price of the latest year up to year, else the earliest price.
+
+        History from before the first priced year uses the earliest price,
+        so the price entered when cost tracking starts covers all history
+        imported at that time.
+        """
+        earlier = [y for y in prices if y <= year]
+        return prices[max(earlier)] if earlier else prices[min(prices)]
+
+    async def _import_cost_statistics(
+        self, meter_type, statistics, fetch_start, full_history, meter_year_data
+    ) -> None:
+        """Import the cumulative cost of the imported consumption.
+
+        Each hour is priced with the price of its own year, and the cost sum
+        continues from the stored cost before the window.  Changing the price
+        therefore never reprices hours from earlier years.  The Energy
+        dashboard can use this statistic under "Use an entity tracking the
+        total costs", which, unlike a price entered there, covers history.
+        """
+        prices = self._prices(meter_type)
+        if not prices or not statistics:
+            return
+        statistic_id = f"{DOMAIN}:{meter_type}_cost"
+        if full_history:
+            cost = 0.0
+        else:
+            cost = await self._sum_before(
+                statistic_id,
+                fetch_start.replace(
+                    tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
+                ),
+            )
+            if cost is None:
+                # No stored cost yet: price the whole history once, in the
+                # background, rather than starting the cost at zero here.
+                if not self._cost_reconciled:
+                    self._cost_reconciled = True
+                    _LOGGER.info(
+                        "No stored %s cost yet; importing all history in the background",
+                        meter_type,
+                    )
+                    self._schedule_full_history(meter_year_data)
+                return
+
+        cost_statistics = []
+        for point in statistics:
+            cost += point["state"] * self._price_for_year(prices, point["start"].year)
+            cost_statistics.append(
+                StatisticData(start=point["start"], state=cost, sum=cost)
+            )
+        metadata = StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=f"Novafos {meter_type} cost",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class=None,
+            unit_of_measurement=self.hass.config.currency,
+        )
+        async_add_external_statistics(self.hass, metadata, cost_statistics)
 
     @staticmethod
     def _kmd_year_total(meter_year_data, meter_type) -> float | None:
@@ -399,10 +547,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
 
                 dataset = self.api.get_grouped_statistics(meter_type, period)
                 statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics_{period}"
-                if meter_type == "water":
-                    unit = UnitOfVolume.CUBIC_METERS
-                else:
-                    unit = UnitOfEnergy.KILO_WATT_HOUR
+                unit, unit_class, _ = meter_unit(meter_device)
 
                 # Naive version - just recalculate the complete history of the sensor data
 
@@ -429,12 +574,13 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     )
 
                 metadata = StatisticMetaData(
-                    mean_type=StatisticMeanType.ARITHMETIC,
+                    # state_class total: no mean, as for the hourly statistic.
+                    mean_type=StatisticMeanType.NONE,
                     has_sum=True,
                     name=None,
                     source=RECORDER_DOMAIN,
                     statistic_id=statistic_id,
-                    unit_class=None,
+                    unit_class=unit_class,
                     unit_of_measurement=unit,
                 )
                 async_import_statistics(self.hass, metadata, statistics)

@@ -18,7 +18,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.const import CONF_NAME
 
-from .const import DEFAULT_NAME
+from .const import DEFAULT_NAME, price_option, prices_option
 
 import logging
 
@@ -140,23 +140,50 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Handle options flow."""
 
+        options = self._config_entry.options
+
         # First time called:
         if user_input is None:
-            # Default to empty string.  This is used to make sure we can detect reasonable changes
-            # to avoid hitting the API with bad data.
-            data_schema = None
+            # The token field starts empty; leaving it empty keeps the current
+            # token, so prices can be changed without pasting the token again.
             data_schema = {
-                vol.Required("access_token", default=""): str,
+                vol.Optional("access_token", default=""): str,
             }
+            year = str(datetime.now().year)
+            for meter_type in ("water", "heating"):
+                prices = options.get(prices_option(meter_type)) or {}
+                # Show this year's price, else the latest one entered.
+                current = prices.get(year) or (
+                    prices[max(prices)] if prices else 0.0
+                )
+                key = price_option(meter_type)
+                data_schema[vol.Optional(key, default=current)] = vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                )
 
             return self.async_show_form(
                 step_id="init", data_schema=vol.Schema(data_schema)
             )
 
-        user_input["access_token_date_updated"] = datetime.now().strftime(
-            "%Y-%m-%dT%H:%M:%S"
-        )
-        return self.async_create_entry(title="", data=user_input)
+        new_options = {**options}
+        year = str(datetime.now().year)
+        for meter_type in ("water", "heating"):
+            # Record the entered price for the current year only; earlier
+            # years keep their price.  0 removes this year's price.
+            prices = dict(new_options.get(prices_option(meter_type)) or {})
+            price = user_input.get(price_option(meter_type), 0.0)
+            if price > 0:
+                prices[year] = price
+            else:
+                prices.pop(year, None)
+            new_options[prices_option(meter_type)] = prices
+            new_options.pop(price_option(meter_type), None)
+        if user_input.get("access_token"):
+            new_options["access_token"] = user_input["access_token"]
+            new_options["access_token_date_updated"] = datetime.now().strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+        return self.async_create_entry(title="", data=new_options)
 
 
 class CannotConnect(HomeAssistantError):
