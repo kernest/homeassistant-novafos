@@ -301,7 +301,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 if meter_type == "water":
                     unit = UnitOfVolume.CUBIC_METERS
                 else:
-                    unit = UnitOfEnergy.KILOWATT_HOUR
+                    unit = UnitOfEnergy.KILO_WATT_HOUR
 
                 # Naive version - just recalculate the complete history of the sensor data
 

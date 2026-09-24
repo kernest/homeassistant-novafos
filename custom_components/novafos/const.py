@@ -24,7 +24,10 @@ WATER_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         entity_registry_enabled_default=True,
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         suggested_display_precision=3,
-        device_class=SensorDeviceClass.WATER,
+        # Home Assistant only permits total/total_increasing state classes for
+        # the water device class. This entity is an interval measurement, not a
+        # cumulative meter, so leave the device class unset.
+        device_class=None,
         icon="mdi:water",
         state_class=SensorStateClass.MEASUREMENT,
     ),

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from homeassistant.components.sensor import SensorStateClass
+
 from custom_components.novafos.const import WATER_SENSOR_TYPES
 from custom_components.novafos.sensor import NovafosWaterSensor
 
@@ -27,6 +29,13 @@ def test_hourly_sensor_returns_latest_completed_reading():
 
     assert sensor.native_value == 0.006
     assert sensor.extra_state_attributes == {"reading_start": "2026-09-22T22:00:00"}
+
+
+def test_hourly_water_sensor_is_a_valid_interval_measurement():
+    description = WATER_SENSOR_TYPES[0]
+
+    assert description.device_class is None
+    assert description.state_class is SensorStateClass.MEASUREMENT
 
 
 def test_hourly_sensor_handles_no_readings():
