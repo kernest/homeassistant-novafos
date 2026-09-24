@@ -105,7 +105,13 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 _LOGGER.exception("Error while updating Novafos data")
                 raise UpdateFailed(f"The service is unavailable: {ex}") from ex
         else:
-            data = (self.api.get_dummy_data(), meter_year_data)  # , None)
+            # Do not publish dummy readings as a successful refresh. This made
+            # expired tokens look like valid zero consumption and prevented the
+            # user from seeing that KMD was never queried.
+            raise UpdateFailed(
+                "The KMD access token is expired or invalid. Update it in the "
+                "NovaFos integration options."
+            )
 
         # The data is stored in the coordinator as a .data field.
         _LOGGER.debug("Returning from Coordinator with data: %s", data)
