@@ -240,7 +240,7 @@ class Novafos:
     def get_meter_types(self):
         return self._active_meters
 
-    def get_available_time_series_periods(self) -> datetime:
+    def get_available_time_series_periods(self) -> datetime | None:
         """Get data from the API about which time series periods are available for the active meters.
         This can be used to determine how far back data is available for the statistics sensor.
 
@@ -281,7 +281,17 @@ class Novafos:
         )
 
         # Entry with RangeType 0 is for the specific meter, and is the one we care about.  It has the actual earliest date of data available.
-        self._earliest_data_date = datetime.fromisoformat(result_json[0]["MinDate"])
+        periods = [p for p in result_json or [] if p.get("RangeType") == 0] or (
+            result_json or []
+        )
+        min_dates = [p["MinDate"] for p in periods if p.get("MinDate")]
+        if not min_dates:
+            _LOGGER.warning(
+                "KMD API returned no available time series periods - not limiting history import"
+            )
+            self._earliest_data_date = None
+            return None
+        self._earliest_data_date = datetime.fromisoformat(min(min_dates))
         # self._earliest_data_date = self._local_str_to_utc(result_json[0]["MinDate"])
         return self._earliest_data_date
 

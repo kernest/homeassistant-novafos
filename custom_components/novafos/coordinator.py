@@ -102,7 +102,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     await self._insert_grouped_statistics(debug=debug)
                 data = (self.api._meter_data, meter_year_data)  # , last_state)
             except Exception as ex:
-                raise UpdateFailed(f"The service is unavailable: {ex}")
+                _LOGGER.exception("Error while updating Novafos data")
+                raise UpdateFailed(f"The service is unavailable: {ex}") from ex
         else:
             data = (self.api.get_dummy_data(), meter_year_data)  # , None)
 
@@ -145,7 +146,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 )
 
                 # Don't go back further than the available data:
-                if min_date > one_year_back:
+                if min_date is not None and min_date > one_year_back:
                     one_year_back = min_date
 
                 _LOGGER.debug(
@@ -160,9 +161,6 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                         self.api.get_statistics, one_year_back
                     )
                 _sum = 0.0
-                _max = data[meter_type][0]["Value"]
-                _min = data[meter_type][0]["Value"]
-                _mean = data[meter_type][0]["Value"]
             else:
                 # Fetch data this many days back
                 delta_days = 1
@@ -215,9 +213,15 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     )
                     # Need to reset sum to 0.0 because we don't know the offset any more.
                     _sum = 0.0
-                    _max = data[meter_type][0]["Value"]
-                    _min = data[meter_type][0]["Value"]
-                    _mean = data[meter_type][0]["Value"]
+
+            if not data.get(meter_type):
+                # KMD publishes hourly readings with a delay, so a refresh can
+                # legitimately return no new points.  Skip instead of failing.
+                _LOGGER.info(
+                    "No new hourly data returned for %s meter - skipping statistics update",
+                    meter_type,
+                )
+                continue
 
             # Array of statistics points
             statistics = []

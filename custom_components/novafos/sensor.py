@@ -45,7 +45,15 @@ async def async_setup_entry(
     # The sensors are defined in the const.py file
     sensors: list[NovafosWaterSensor] = []
     # The coordinator data is already populated and this means it is possible to 'auto-discover' which sensors to create:
-    if "water" in coordinator.data[0]:
+    # If the first refresh failed coordinator.data is None.  Fall back to the
+    # meters discovered during authentication so the entities still get created
+    # and become available once a later refresh succeeds.
+    if coordinator.data is not None:
+        meter_types = set(coordinator.data[0])
+    else:
+        meter_types = {meter["type"] for meter in coordinator.api.get_meter_types()}
+
+    if "water" in meter_types:
         for description in WATER_SENSOR_TYPES:
             sensors.append(NovafosWaterSensor(name, coordinator, description))
             # _LOGGER.debug("Adding Novafos sensor %s", description.name)
@@ -54,7 +62,7 @@ async def async_setup_entry(
                 sensors.append(NovafosWaterSensor(name, coordinator, description))
                 # _LOGGER.debug("Adding Novafos sensor %s", description.name)
 
-    if "heating" in coordinator.data[0]:
+    if "heating" in meter_types:
         for description in HEATING_SENSOR_TYPES:
             sensors.append(NovafosWaterSensor(name, coordinator, description))
         if config.data["use_grouped_sensors"]:
@@ -99,7 +107,9 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
               at the end of the year.
         """
         _LOGGER.debug(self.coordinator.data)
-        if self.entity_description.key == "hourly":
+        if self.coordinator.data is None:
+            self._attrs = {}
+        elif self.entity_description.key == "hourly":
             readings = self.coordinator.data[0].get(
                 self.entity_description.sensor_type, []
             )
@@ -111,9 +121,14 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
             self.entity_description.key == "statistics"
             and self.coordinator.data[1] is not None
         ):
-            self._attrs["year_total"] = self.coordinator.data[1][
-                self.entity_description.sensor_type
-            ]["Data"][-1]["Value"]
+            self._attrs = {}
+            year_data = (
+                self.coordinator.data[1]
+                .get(self.entity_description.sensor_type, {})
+                .get("Data", [])
+            )
+            if year_data:
+                self._attrs["year_total"] = year_data[-1]["Value"]
         #     self._attrs["last_valid_date"] = self.coordinator.data[self.entity_description.sensor_type][self.entity_description.key]["LastValidDate"]
         else:
             self._attrs = {}
@@ -124,6 +139,8 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self) -> StateType:
         """Return the latest completed hourly consumption reading."""
+        if self.coordinator.data is None:
+            return None
         if self.entity_description.key == "hourly":
             readings = self.coordinator.data[0].get(
                 self.entity_description.sensor_type, []
