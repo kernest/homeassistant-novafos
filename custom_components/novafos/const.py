@@ -99,7 +99,8 @@ HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         entity_registry_enabled_default=True,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=3,
-        device_class=SensorDeviceClass.ENERGY,
+        # This is an interval measurement rather than a cumulative energy meter.
+        device_class=None,
         icon="mdi:lightning-bolt-circle",
         state_class=SensorStateClass.MEASUREMENT,
     ),
@@ -112,7 +113,7 @@ HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         suggested_display_precision=3,
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
     ),
 )
 
@@ -126,7 +127,7 @@ EXTRA_HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         suggested_display_precision=3,
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
     ),
     NovafosSensorDescription(
         sensor_type="heating",
@@ -137,7 +138,7 @@ EXTRA_HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         suggested_display_precision=3,
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
     ),
     NovafosSensorDescription(
         sensor_type="heating",
@@ -148,7 +149,7 @@ EXTRA_HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         suggested_display_precision=3,
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
     ),
     NovafosSensorDescription(
         sensor_type="heating",
@@ -159,6 +160,6 @@ EXTRA_HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         suggested_display_precision=3,
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
     ),
 )
