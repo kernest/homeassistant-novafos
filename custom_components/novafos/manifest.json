@@ -2,14 +2,14 @@
   "domain": "novafos",
   "name": "Novafos",
   "codeowners": [
-    "@kpoppel"
+    "@kernest"
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/kpoppel/homeassistant-novafos",
+  "documentation": "https://github.com/kernest/homeassistant-novafos",
   "homekit": {},
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/kpoppel/homeassistant-novafos/issues",
+  "issue_tracker": "https://github.com/kernest/homeassistant-novafos/issues",
   "requirements": [],
   "ssdp": [],
   "version": "5.3.0",

@@ -1,0 +1,20 @@
+services:
+  novafos-token-renewer:
+    build: .
+    container_name: novafos-token-renewer
+    restart: unless-stopped
+    environment:
+      # The portal URL you use to log in (after choosing your municipality on
+      # novafos.dk), for example https://minforsyning-2.kmd.dk/...
+      NOVAFOS_LOGIN_URL: "https://minforsyning-2.kmd.dk/"
+      HA_URL: "http://homeassistant.local:8123"
+      HA_TOKEN: "${HA_TOKEN}"            # Home Assistant long-lived access token
+      VNC_PASSWORD: "${VNC_PASSWORD}"
+      NOVNC_URL: "http://docker-host:6080/vnc.html"
+      RENEW_INTERVAL_MINUTES: "180"
+      TZ: "Europe/Copenhagen"            # must match Home Assistant's time zone
+    ports:
+      - "6080:6080"                      # noVNC, for the occasional login
+    volumes:
+      - ./data:/data                     # browser profile: holds the KMD session
+    shm_size: "1gb"                      # Chromium needs more than Docker's default

@@ -1,37 +1,58 @@
 # Novafos/Easy-Energy integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/custom-components/hacs)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz/docs/faq/custom_repositories/)
 
-The `novafos` component is a Home Assistant custom component for monitoring your water metering data from Novafos (via KMD Easy-Energy).
+The `novafos` component is a Home Assistant custom component for monitoring your water and district heating metering data from Novafos (via KMD Easy-Energy).
 
 The API client talks to KMD Easy-Energy rather than a NovaFos-specific data
 service. It can therefore also work with other utilities on the same platform,
 including Hillerød Forsyning, when supplied with a bearer token from that
 utility's KMD customer portal.
 
-## Optimized data import
+## About this fork
 
-Historical hourly data is fetched in 31-day chunks. The original implementation
-made one request per meter per day, causing a first import to issue hundreds of
-sequential requests and appear to hang. Initial history is now limited to the
-documented 365 days, network calls have finite timeouts, and water/heating data
-remains isolated when an account has multiple meter types.
+This is a fork of [kpoppel/homeassistant-novafos](https://github.com/kpoppel/homeassistant-novafos),
+the original integration by kpoppel, and is kept in sync with it. It is not the
+version in the HACS default store. Changes in this fork:
+
+* **Complete history.** KMD returns only the first day of a multi-day hourly
+  request, so history is fetched one day per request and checked against KMD's
+  own totals. The first import covers all history KMD has, and runs in the
+  background so Home Assistant starts normally.
+* **Self-correcting statistics.** Every refresh re-imports the last 31 days.
+  When Home Assistant's year-to-date total differs from KMD's, the full history
+  is re-imported automatically.
+* **Energy dashboard.** The consumption is imported as the external statistics
+  `novafos:water_consumption` and `novafos:heating_consumption`, which the
+  Energy dashboard can use without recorder interfering.
+* **Cost tracking.** Optional water and heating prices per year produce the
+  cost statistics `novafos:water_cost` and `novafos:heating_cost`.
+* **Heating units.** The unit KMD reports for the heating meter (kWh, MWh, GJ or
+  m³) is used instead of always kWh.
+* **Latest hour sensors** and a clear error when the access token has expired.
+* **Token renewer.** A Docker service that keeps the access token fresh, see
+  [Login methods](#login-methods).
 
 ---
 # Installation
 ---
 
-### Manual Installation
-  1. Copy novafos folder into your custom_components folder in your hass configuration directory.
-  2. Restart Home Assistant
-  3. Add and configure the Novafos integration.
-  4. Restart Home Assistant.
+Requires Home Assistant 2026.9 or newer.
 
 ### Installation with HACS (Home Assistant Community Store)
   1. Ensure that [HACS](https://hacs.xyz/) is installed.
-  2. Search for and install the Novafos integration.
+  2. In HACS, open the menu (three dots) and select **Custom repositories**.
+  3. Add `https://github.com/kernest/homeassistant-novafos` with type **Integration**.
+  4. HACS now lists two Novafos integrations. Open the one whose page shows the section "About this fork", and select **Download**.
+  5. Restart Home Assistant.
+  6. Add and configure the Novafos integration.
+
+To update, select **Update information** on the repository in HACS and download again.
+
+### Manual Installation
+  1. Copy the `custom_components/novafos` folder into the `custom_components` folder in your Home Assistant configuration directory.
+  2. Restart Home Assistant.
   3. Add and configure the Novafos integration.
-  4. Restart Home Assistant.
 
 ---
 ## Configuration
@@ -42,17 +63,19 @@ Fully configurable through config flow.
   2. Add new and search for Novafos
   3. Enter your name for the sensors, default is "Novafos", but if you have more, go ahead and change it.
   4. External hourly consumption statistics are enabled by default. The separate grouped statistics sensor option is deprecated; enable it only if you still use those entities.
-  5. Enter a working access token to get started.  This will pre-load statistics 1 calendar year back in time.
-     You can enter some random text to create the sensors without the pre-load of data.
+  5. Enter a working access token to get started.  All history KMD has is then imported in the background,
+     which can take several minutes. You can enter some random text to create the sensors without the pre-load of data.
 
-Both options can be changed later via Configure. Older installations keep their grouped sensor setting; external statistics are enabled by default independently of that setting. Disabling grouped sensors stops importing their grouped history, but does not delete existing recorder history. The main hourly `sensor.*` history remains available regardless of either option.
+Both options can be changed later via Configure, where you can also paste a new access token (leave the field empty to keep
+the current one) and enter the water and heating price per unit for the current year. Each year keeps its own price, so a new
+price never reprices earlier years; history from before the first price uses the first price entered. Older installations keep their grouped sensor setting; external statistics are enabled by default independently of that setting. Disabling grouped sensors stops importing their grouped history, but does not delete existing recorder history. The main hourly `sensor.*` history remains available regardless of either option.
 
 ---
 # Notice on integration status and ways to login
 ---
 
 The integration works only off valid Bearer tokens extracted from a 'proper' login on the Novafos website.
-If you want to make it really easy, you may want to check out the Chrome extension I wrote for that very purpose.
+To renew it automatically, use the token renewer described under [Login methods](#login-methods), or the Chrome extension kpoppel wrote for that purpose.
 Check this repository: https://github.com/kpoppel/homeassistant-novafos-chrome-addon
 
 Unfortunately Novafos and KMD "Easy-Energy" does not care anything about secure machine-usable access to their customer's
@@ -79,7 +102,15 @@ There is a thread on the forum as well: https://community.home-assistant.io/t/hi
 
 **NOTE:** The extension currently only supports tokens retrieved from login using email and password. MitID login is not tested and reported not working at this time. (Thanks to bimmer1977 for reporting).
 
-## Method 1: Using Chrome add-on (medium advanced, has some requirements, recommended).
+## Automatic renewal with the token renewer (recommended)
+
+The [`token-renewer`](token-renewer/README.md) Docker service keeps a browser
+logged in to KMD and sends a fresh token to Home Assistant every few hours.
+You log in once through noVNC, solving the reCAPTCHA yourself, and again only
+when KMD's login session expires; Home Assistant notifies you when that
+happens. No HTTPS, CORS or browser extension is needed.
+
+## Method 1: Using Chrome add-on (medium advanced, has some requirements).
 
 Install the Chrome extension from this Github repository: https://github.com/kpoppel/homeassistant-novafos-chrome-addon/releases.
 README file in that place for the details. The extension automates scraping the token and sending it to Home Assistant.
@@ -134,7 +165,11 @@ This means we have a slightly different visualisation flow compared to other sen
 The integration creates the following sensors for water/heating (here water used an an example).  "novafos" is configurable, this is the default value:
 * sensor.novafos_water_statistics
   * Statistics sensor with hourly resolution. Stores a cumulative `sum`. Use `change` to see consumption per hour, day, week or month.
-  * This is the sensor you want to use for the energy dashboard.
+  * The imported total is shown in its `cumulative_total` attribute.
+* `novafos:water_consumption` (`novafos:heating_consumption` for heating)
+  * The same hourly series as an external statistic. **Use this one in the Energy dashboard.**
+* `novafos:water_cost` (`novafos:heating_cost` for heating, only when a price is configured)
+  * Cumulative cost in your Home Assistant currency. In the Energy dashboard select "Use an entity tracking the total costs".
 * sensor.novafos_water_statistics_{day|week|month|year} (optional, deprecated)
   * Historical totals for each completed day, week, month or year. These are computed period totals.
   * **Migrate away from these and use the external statistic instead.**
@@ -146,8 +181,8 @@ The integration creates the following sensors for water/heating (here water used
   * Use `mean` to see average consumption per reported hour within the selected period. The mean is dependent on the hours with data points.
   * Use `change` to see the trend of consumption between selected periods. A rising trend is probably not a good sign.
 
-Water statistics use cubic meters (m3), heating statistics kilowatt-hours (kWh). Only `sum` is stored, since Home Assistant does not
-like `TOTAL` type sensors (statistics-only) to have `min`, `max` or `mean`. The `novafix:..._hourly_consumption` statistic stores
+Water statistics use cubic meters (m³), heating statistics the unit KMD reports for the meter (kWh, MWh, GJ or m³). Only `sum` is stored, since Home Assistant does not
+like `TOTAL` type sensors (statistics-only) to have `min`, `max` or `mean`. The `novafos:..._hourly_consumption` statistic stores
 arithmetic min/mean/max and change without changing the Energy dashboard's sensor history.
 The main sensor also exposes a `year_total` attribute when yearly data is available.
 
