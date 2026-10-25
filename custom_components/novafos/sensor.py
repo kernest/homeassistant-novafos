@@ -45,6 +45,9 @@ async def async_setup_entry(
 
     # The sensors are defined in the const.py file
     sensors: list[NovafosWaterSensor] = []
+    use_grouped_sensors = config.options.get(
+        "use_grouped_sensors", config.data.get("use_grouped_sensors", False)
+    )
     # The coordinator data is already populated and this means it is possible to 'auto-discover' which sensors to create:
     # If the first refresh failed coordinator.data is None.  Fall back to the
     # meters discovered during authentication so the entities still get created
@@ -58,7 +61,7 @@ async def async_setup_entry(
         for description in WATER_SENSOR_TYPES:
             sensors.append(NovafosWaterSensor(name, coordinator, description))
             # _LOGGER.debug("Adding Novafos sensor %s", description.name)
-        if config.data["use_grouped_sensors"]:
+        if use_grouped_sensors:
             for description in EXTRA_WATER_SENSOR_TYPES:
                 sensors.append(NovafosWaterSensor(name, coordinator, description))
                 # _LOGGER.debug("Adding Novafos sensor %s", description.name)
@@ -66,7 +69,7 @@ async def async_setup_entry(
     if "heating" in meter_types:
         for description in HEATING_SENSOR_TYPES:
             sensors.append(NovafosWaterSensor(name, coordinator, description))
-        if config.data["use_grouped_sensors"]:
+        if use_grouped_sensors:
             for description in EXTRA_HEATING_SENSOR_TYPES:
                 sensors.append(NovafosWaterSensor(name, coordinator, description))
 

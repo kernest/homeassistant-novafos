@@ -12,12 +12,15 @@
             "user": {
                 "data": {
                     "name": "Sensornavn Præfix",
-                    "use_grouped_sensors": "Brug ekstra statistiksensorer til dag, uge, måned og år"
+                    "use_grouped_sensors": "Brug ekstra statistiksensorer til dag, uge, måned og år (udfases)",
+                    "use_external_statistics": "Opret eksterne timestatistikker til forbrugstendenser"
                 }
             },
             "step_2": {
                 "data": {
-                    "access_token": "Indsæt adgangstoken til opsætning eller opdatering af sensorer"
+                    "access_token": "Indsæt adgangstoken til opsætning eller opdatering af sensorer",
+                    "use_grouped_sensors": "Brug ekstra statistiksenorer til dag, uge, måned og år (udfases)",
+                    "use_external_statistics": "Opret eksterne timestatistikker til forbrugstendenser"
                 }
             }
         }
@@ -27,6 +30,8 @@
             "init": {
                 "data": {
                     "access_token": "Indsæt adgangstoken (lad feltet være tomt for at beholde det nuværende)",
+                    "use_grouped_sensors": "Brug ekstra statistiksensorer til dag, uge, måned og år (udfases)",
+                    "use_external_statistics": "Opret eksterne timestatistikker til forbrugstendenser",
                     "water_price": "Vandpris pr. m³ fra i år (0 = fjern årets pris)",
                     "heating_price": "Varmepris pr. enhed fra i år (0 = fjern årets pris)"
                 }
