@@ -4,7 +4,8 @@
       "user": {
         "data": {
           "name": "[%key:common::config_flow::data::name%]",
-          "use_grouped_sensors": "[%key:common::config_flow::data::use_grouped_sensors%]"
+          "use_grouped_sensors": "Create grouped statistics sensors by day, week, month, year (deprecated)",
+          "use_external_statistics": "Create external hourly consumption statistics for trend graphs"
         }
       }
     },
@@ -15,6 +16,19 @@
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "access_token": "Insert a working access token (leave empty to keep the current one)",
+          "water_price": "Water price per m³ from this year on (0 = clear this year's price)",
+          "heating_price": "Heating price per unit from this year on (0 = clear this year's price)",
+          "use_grouped_sensors": "Create grouped statistics sensors by day, week, month, year (deprecated)",
+          "use_external_statistics": "Create external hourly consumption statistics for trend graphs"
+        }
+      }
     }
   }
 }

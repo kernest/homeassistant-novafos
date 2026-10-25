@@ -7,14 +7,12 @@ from datetime import datetime
 
 import voluptuous as vol
 
-from homeassistant import (
-    config_entries,
-)
 from .const import DOMAIN
 
 from homeassistant.core import callback
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigFlowResult
+from homeassistant import config_entries
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.const import CONF_NAME
 
@@ -50,6 +48,9 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for novafos."""
 
+    # Version 5 schedules the one-time full KMD history reconciliation.  The
+    # statistics options added later are read with defaults, so they need no
+    # entry migration.
     VERSION = 5
     MINOR_VERSION = 0
 
@@ -58,12 +59,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
         # Setup a name for the integration instance
         data_schema = {
             vol.Optional(CONF_NAME, default=DEFAULT_NAME): str,
             vol.Optional("use_grouped_sensors", default=False): bool,
+            vol.Optional("use_external_statistics", default=True): bool,
         }
 
         # First run - present dialog:
@@ -87,7 +89,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_manual_token_flow(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle options during setup. These functions are called at least twice.
         First round has user_input = None, and shows the form.  Then it is called again with user_input set.
         """
@@ -104,10 +106,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data_schema=vol.Schema(data_schema),
             )
 
-        # Validate - not implemented
-        _LOGGER.debug(user_input)
+        # Validate - not implemented.  Never log the token itself.
         _LOGGER.debug(self.data)
-        _LOGGER.debug(self.options)
         # Anyway, set options related to the chosen login method
         self.options["access_token"] = user_input.get("access_token")
         # Hidden field:
@@ -137,10 +137,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle options flow."""
 
         options = self._config_entry.options
+        data = self._config_entry.data
 
         # First time called:
         if user_input is None:
@@ -160,6 +161,26 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 data_schema[vol.Optional(key, default=current)] = vol.All(
                     vol.Coerce(float), vol.Range(min=0)
                 )
+            # Migration path off the deprecated grouped sensors: switching
+            # them off removes the entities on reload, but keeps their
+            # recorded statistics.
+            data_schema[
+                vol.Optional(
+                    "use_grouped_sensors",
+                    default=options.get(
+                        "use_grouped_sensors", data.get("use_grouped_sensors", False)
+                    ),
+                )
+            ] = bool
+            data_schema[
+                vol.Optional(
+                    "use_external_statistics",
+                    default=options.get(
+                        "use_external_statistics",
+                        data.get("use_external_statistics", True),
+                    ),
+                )
+            ] = bool
 
             return self.async_show_form(
                 step_id="init", data_schema=vol.Schema(data_schema)
@@ -178,6 +199,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 prices.pop(year, None)
             new_options[prices_option(meter_type)] = prices
             new_options.pop(price_option(meter_type), None)
+        for key in ("use_grouped_sensors", "use_external_statistics"):
+            if key in user_input:
+                new_options[key] = user_input[key]
         if user_input.get("access_token"):
             new_options["access_token"] = user_input["access_token"]
             new_options["access_token_date_updated"] = datetime.now().strftime(

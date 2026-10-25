@@ -4,30 +4,30 @@ If Home Assistant is installed as stand-alone using pip install and a venv:
 ```
 source /srv/homeassistant/bin/activate
 
-pip install -r requirements.test.txt
-
 cd ~/.homeassistant/custom_componts/homeassistant-novafos
-pre-commit install
+scripts/setup        # installs requirements_common.txt and requirements_dev.txt
 ```
 
-## Run pre-commits:
+The dev container runs `scripts/setup` automatically.
+
+## Lint
 
 ```
-pre-commit run --all-files
-pre-commit run --show-diff-on-failure
-```
-or individually
-
-```
-ruff check homeassistant/core.py
-pylint homeassistant/core.py
+ruff check .
+ruff format --check .
 ```
 
 ## Run tests
+From the repository root (`pytest.ini` sets the test path and asyncio mode):
+
 ```
-cd ~/.homeassistant
 pytest
 ```
+
+The tests never contact KMD or a live Home Assistant: API responses are
+mocked and the coordinator tests use an in-memory statistics store, plus one
+round trip through a temporary recorder database.
+
 ## Commit code
 ```
 git commit -a --no-verify
@@ -64,11 +64,10 @@ import pytest
 
 ## Mocking datetime
 
-```
-from unittest import mock
+Use the `freezer` fixture from pytest-homeassistant-custom-component:
 
-def test.---()
-    with mock.patch('datetime.datetime') as mock_datetime:
-        mock_datetime.now.return_value = datetime(2025, 1, 11, 0, 0) 
-        ... more test code
+```
+def test_something(freezer):
+    freezer.move_to("2026-10-08T12:00:00")
+    ... more test code
 ```

@@ -25,6 +25,7 @@ from .const import (
     price_option,
     prices_option,
 )
+from .legacy_statistics import async_import_grouped_statistics
 from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN, get_instance
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -52,6 +53,28 @@ import logging
 _LOGGER = logging.getLogger(__name__)
 
 
+def use_grouped_sensors(entry: ConfigEntry) -> bool:
+    """Return whether the deprecated grouped sensors are enabled.
+
+    Chosen at setup (entry.data) and changeable in the options dialog, which
+    then takes precedence.
+    """
+    return entry.options.get(
+        "use_grouped_sensors", entry.data.get("use_grouped_sensors", False)
+    )
+
+
+def use_external_statistics(entry: ConfigEntry) -> bool:
+    """Return whether novafos:<type>_hourly_consumption is maintained.
+
+    Defaults to on, also for entries created before the option existed: the
+    statistic is new and separate, so enabling it changes no existing data.
+    """
+    return entry.options.get(
+        "use_external_statistics", entry.data.get("use_external_statistics", True)
+    )
+
+
 class NovafosUpdateCoordinator(DataUpdateCoordinator):
     """DataUpdateCoordinator for Novafos."""
 
@@ -65,6 +88,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         self.api = api
         self.hass = hass
         self.entry = entry
+        # The sensor platform creates the grouped entities from this value at
+        # setup.  The update listener reloads the entry when it changes.
+        self.use_grouped_sensors = use_grouped_sensors(entry)
         # Attribute data for the sensors
         self.attrib_data = {"year_total": None}
         # Latest cumulative sums imported into recorder.  The corresponding
@@ -124,8 +150,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 # last_state = await self._insert_statistics(debug=debug)
                 async with self._import_lock:
                     await self._insert_statistics(meter_year_data, debug=debug)
-                    if self.entry.data["use_grouped_sensors"]:
-                        await self._insert_grouped_statistics(debug=debug)
+                    if use_grouped_sensors(self.entry):
+                        await async_import_grouped_statistics(self.hass, self.api)
                     data = (self.api._meter_data, meter_year_data)  # , last_state)
             except Exception as ex:
                 _LOGGER.exception("Error while updating Novafos data")
@@ -133,7 +159,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         else:
             # Do not publish dummy readings as a successful refresh. This made
             # expired tokens look like valid zero consumption and prevented the
-            # user from seeing that KMD was never queried.
+            # user from seeing that KMD was never queried.  Nothing is written
+            # to the recorder either, so no statistic gets zero-filled hours.
             raise UpdateFailed(
                 "The KMD access token is expired or invalid. Update it in the "
                 "NovaFos integration options."
@@ -160,8 +187,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 await self._insert_statistics(
                     meter_year_data, debug=False, full_history=True
                 )
-                if self.entry.data["use_grouped_sensors"]:
-                    await self._insert_grouped_statistics(debug=False)
+                if use_grouped_sensors(self.entry):
+                    await async_import_grouped_statistics(self.hass, self.api)
                 data = (self.api._meter_data, meter_year_data)
             self.async_set_updated_data(data)
             _LOGGER.info("Full KMD history reconciliation finished")
@@ -240,6 +267,10 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 STATISTICS_LOOKBACK_DAYS,
                 fetch_start,
             )
+        # fetch_start is naive local time; recorder needs it aware.
+        window_start = fetch_start.replace(
+            tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
+        )
 
         if debug:
             data = self.api._meter_data
@@ -275,13 +306,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 # Anchor the rolling replacement window to the last cumulative
                 # sum immediately before it. Selecting the first row from an
                 # open-ended query used an old sum and corrupted later imports.
-                # fetch_start is naive local time; recorder needs it aware.
-                anchor_sum = await self._sum_before(
-                    statistic_id,
-                    fetch_start.replace(
-                        tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
-                    ),
-                )
+                anchor_sum = await self._sum_before(statistic_id, window_start)
                 _LOGGER.debug("Cumulative anchor before %s: %s", fetch_start, anchor_sum)
                 if anchor_sum is not None:
                     _sum = anchor_sum
@@ -306,7 +331,6 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             statistics = []
 
             # Populate statistics array
-            last_value = data[meter_type][0]["Value"]
             for val in data[meter_type]:
                 # Add timezone to dataset as Home Assistant works in UTC
                 from_time = dt_util.parse_datetime(f"{val['DateFrom']}").replace(
@@ -315,37 +339,20 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 if sum_before_year is None and from_time >= year_start:
                     sum_before_year = _sum
                 _sum += val["Value"]
-                _max = last_value if val["Value"] < last_value else val["Value"]
-                _min = last_value if val["Value"] >= last_value else val["Value"]
-                _mean = (_min + _max) / 2
-                last_value = val["Value"]
                 # _LOGGER.debug(f"Adding: {from_time}, {val["Value"]}, {_sum}")
 
+                # No min/max/mean: the statistics sensors have state_class
+                # total, for which Home Assistant does not allow a mean.  The
+                # trend values live in the hourly consumption statistic below.
                 statistics.append(
                     StatisticData(
                         start=from_time,
                         state=val["Value"],
                         sum=_sum,
-                        min=_min,
-                        max=_max,
-                        mean=_mean,
                     )
                 )
 
-            # For min/max/average check out https://github.com/emontnemery/home-assistant/blob/dev/homeassistant/components/kitchen_sink/__init__.py#L148,
-            # https://github.com/emontnemery/home-assistant/blob/dev/homeassistant/components/recorder/models/statistics.py#L31
-            # metadata = StatisticMetaData(
-            #     mean_type=StatisticMeanType.ARITHMETIC,
-            #     has_sum=True,
-            #     name=f"Novafos {meter_type} Statistics",
-            #     source=DOMAIN,
-            #     statistic_id=statistic_id,
-            #     unit_of_measurement=unit,
-            # )
-            # Creates a new statistics "novafos:<name>".  This is different from the sensor.<name>
-            # async_add_external_statistics(self.hass, metadata, statistics)
-
-            # Apexchart does not understand the domain:statistic noation, so we'll use an internal sensor instead.
+            # Apexchart does not understand the domain:statistic notation, so we'll use an internal sensor instead.
             # Update the sensor statistics.  Only the hourly one is needed as the sensor can then aggregate data itself.
             metadata = StatisticMetaData(
                 # These entities have state_class total, for which Home
@@ -377,6 +384,15 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 ),
                 statistics,
             )
+            if use_external_statistics(self.entry):
+                await self._insert_external_hourly_statistics(
+                    meter_type,
+                    unit,
+                    unit_class,
+                    statistics,
+                    window_start,
+                    full_history,
+                )
             # Shown as an attribute on the statistics sensor.
             self.cumulative_totals[meter_type] = _sum
             await self._import_cost_statistics(
@@ -449,6 +465,90 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             entry_data = dict(self.entry.data)
             entry_data.pop(HISTORY_RECONCILIATION_KEY, None)
             self.hass.config_entries.async_update_entry(self.entry, data=entry_data)
+
+    async def _insert_external_hourly_statistics(
+        self, meter_type, unit, unit_class, statistics, window_start, full_history
+    ) -> None:
+        """Import novafos:<type>_hourly_consumption with min/max/mean.
+
+        Home Assistant does not allow a mean on the total statistics sensors,
+        so statistics graphs of average or peak hourly consumption read this
+        external statistic instead.  Each hour's consumption is its min, max
+        and mean; the sum is the same cumulative sum as the other statistics,
+        so the series is deterministic and replaced together with them.
+
+        The imported window is written directly.  When the statistic has no
+        rows up to the window, e.g. the option was just enabled on an existing
+        installation, older hours are copied once from the
+        novafos:<type>_consumption statistic.  That statistic is only written
+        by this integration, unlike sensor.* rows recorder may have compiled.
+        A full history import rewrites the whole series instead.
+        """
+        statistic_id = f"{DOMAIN}:{meter_type}_hourly_consumption"
+        rows = []
+        if not full_history:
+            last_stats = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
+            )
+            last_rows = last_stats.get(statistic_id, [])
+            last_start = last_rows[0].get("start") if last_rows else None
+            if last_start is None or last_start < window_start.timestamp():
+                source_id = f"{DOMAIN}:{meter_type}_consumption"
+                _LOGGER.info(
+                    "Backfilling %s from %s before %s",
+                    statistic_id,
+                    source_id,
+                    window_start,
+                )
+                history = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    dt(1970, 1, 1, tzinfo=dt_util.UTC),
+                    window_start,
+                    {source_id},
+                    "hour",
+                    None,
+                    {"state", "sum"},
+                )
+                for row in history.get(source_id, []):
+                    value = row.get("state")
+                    timestamp = row.get("start")
+                    running_sum = row.get("sum")
+                    if value is None or timestamp is None or running_sum is None:
+                        continue
+                    rows.append(
+                        StatisticData(
+                            start=dt.fromtimestamp(timestamp, dt_util.UTC),
+                            min=value,
+                            max=value,
+                            mean=value,
+                            sum=running_sum,
+                        )
+                    )
+
+        for point in statistics:
+            rows.append(
+                StatisticData(
+                    start=point["start"],
+                    min=point["state"],
+                    max=point["state"],
+                    mean=point["state"],
+                    sum=point["sum"],
+                )
+            )
+        if not rows:
+            return
+
+        metadata = StatisticMetaData(
+            mean_type=StatisticMeanType.ARITHMETIC,
+            has_sum=True,
+            name=f"Novafos {meter_type} hourly consumption",
+            source=DOMAIN,
+            statistic_id=statistic_id,
+            unit_class=unit_class,
+            unit_of_measurement=unit,
+        )
+        async_add_external_statistics(self.hass, metadata, rows)
 
     def _prices(self, meter_type) -> dict[int, float]:
         """Return the configured price per year for a meter type."""
@@ -557,62 +657,6 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         )
         rows = stat.get(statistic_id, [])
         return cast(float, rows[-1]["sum"]) if rows else None
-
-    async def _insert_grouped_statistics(
-        self, grouping=("day", "week", "month", "year"), debug=False
-    ) -> None:
-        """Update statistics when data is returned"""
-        # Iterate over water/heating
-        # _get_meter_types returns:
-        #      [{'type': 'water', 'InstallationId': 11223344, 'MeasurementPointId': 33445566, 'Unit': {'Id': 10319, 'Name': 'm³', 'Description': 'Vand', 'Decimals': 0, 'Order': 1}}]
-        for meter_device in self.api.get_meter_types():
-            for period in grouping:
-                meter_type = meter_device["type"]
-                _LOGGER.debug(
-                    "Generating grouped statistics data for %s meter for %s.",
-                    meter_type,
-                    period,
-                )
-
-                dataset = self.api.get_grouped_statistics(meter_type, period)
-                statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics_{period}"
-                unit, unit_class, _ = meter_unit(meter_device)
-
-                # Naive version - just recalculate the complete history of the sensor data
-
-                # Array of statistics points
-                statistics = []
-
-                # Populate statistics array
-                for date, _sum, _change, _min, _max, _mean in dataset:
-                    # Add timezone to dataset as Home Assistant works in UTC
-                    from_time = dt_util.parse_datetime(date).replace(
-                        tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
-                    )
-                    # _LOGGER.debug(f"Adding: {from_time}, {val["Value"]}, {_sum}")
-
-                    statistics.append(
-                        StatisticData(
-                            start=from_time,
-                            state=_sum,
-                            sum=_sum,
-                            min=_min,
-                            max=_max,
-                            mean=_mean,
-                        )
-                    )
-
-                metadata = StatisticMetaData(
-                    # state_class total: no mean, as for the hourly statistic.
-                    mean_type=StatisticMeanType.NONE,
-                    has_sum=True,
-                    name=None,
-                    source=RECORDER_DOMAIN,
-                    statistic_id=statistic_id,
-                    unit_class=unit_class,
-                    unit_of_measurement=unit,
-                )
-                async_import_statistics(self.hass, metadata, statistics)
 
 
 class InvalidAuth(HomeAssistantError):

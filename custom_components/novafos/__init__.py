@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .coordinator import NovafosUpdateCoordinator
+from .coordinator import NovafosUpdateCoordinator, use_grouped_sensors
 from .services import async_setup_services
 
 from homeassistant.config_entries import ConfigEntry
@@ -37,9 +37,19 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
     This code added because of reCAPTCHA login screen
     """
-    _LOGGER.debug(f"Options updated: {entry.options}")
+    # The options hold the access token, so only log which options are set.
+    _LOGGER.debug(
+        "Options updated for Novafos entry %s: %s",
+        entry.entry_id,
+        sorted(entry.options),
+    )
     # Ensure the coordinator picks up the updated token/options
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    # The grouped entities are created at setup, so reload when they are
+    # switched on or off.  Their recorded statistics are kept.
+    if coordinator.use_grouped_sensors != use_grouped_sensors(entry):
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
     # Update coordinator local copies from the stored entry options
     coordinator.access_token = entry.options.get("access_token", "")
     coordinator.access_token_date_updated = entry.options.get(
@@ -124,9 +134,6 @@ async def async_migrate_entry(hass, config_entry: ConfigEntry) -> bool:
         new = {**config_entry.options}
         data = {**config_entry.data}
 
-        _LOGGER.debug(new)
-        _LOGGER.debug(data)
-
         if "username" in new:
             del new["username"]
         if "password" in new:
@@ -136,10 +143,6 @@ async def async_migrate_entry(hass, config_entry: ConfigEntry) -> bool:
         if "supplierid" in data:
             del data["supplierid"]
         del data["login_method"]
-
-        _LOGGER.debug("After:")
-        _LOGGER.debug(new)
-        _LOGGER.debug(data)
 
         hass.config_entries.async_update_entry(
             config_entry, data=data, options=new, version=4
