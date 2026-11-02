@@ -304,8 +304,11 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     fetch_start.replace(
                         tzinfo=dt_util.get_time_zone(self.hass.config.time_zone)
                     ),
+                    {unit_class: unit},
                 )
-                _LOGGER.debug("Cumulative anchor before %s: %s", fetch_start, anchor_sum)
+                _LOGGER.debug(
+                    "Cumulative anchor before %s: %s", fetch_start, anchor_sum
+                )
                 if anchor_sum is not None:
                     _sum = anchor_sum
                 else:
@@ -421,7 +424,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 # the year comes from rows recorder already holds.  A full
                 # import restarts the sum at zero, so older recorder rows must
                 # not be used; the in-memory value above is correct there.
-                sum_before_year = await self._sum_before(statistic_id, year_start)
+                sum_before_year = await self._sum_before(
+                    statistic_id, year_start, {unit_class: unit}
+                )
             ha_year_total = _sum - (sum_before_year or 0.0)
             tolerance = max(
                 RECONCILIATION_TOLERANCE_ABS,
@@ -705,8 +710,14 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         ]
         return sum(values) if values else None
 
-    async def _sum_before(self, statistic_id, point) -> float | None:
-        """Return the recorder's cumulative sum in the hour before point."""
+    async def _sum_before(self, statistic_id, point, units=None) -> float | None:
+        """Return the recorder's cumulative sum in the hour before point.
+
+        units ({unit class: unit}) must be the unit the sum is imported in.
+        Without it recorder converts a sensor.* statistic to the entity's
+        display unit: a heating sensor shown in kWh returned an MWh sum as
+        kWh, and the window continued from a sum 1000 times too large.
+        """
         stat = await get_instance(self.hass).async_add_executor_job(
             statistics_during_period,
             self.hass,
@@ -714,7 +725,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             point,
             {statistic_id},
             "hour",
-            None,
+            units,
             {"sum"},
         )
         rows = stat.get(statistic_id, [])

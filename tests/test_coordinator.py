@@ -15,17 +15,11 @@ from homeassistant.components.recorder.models import (
     StatisticMetaData,
 )
 from homeassistant.components.recorder.statistics import valid_statistic_id
-from homeassistant.components.sensor import SensorStateClass
 
 from custom_components.novafos import coordinator as coordinator_module
-from custom_components.novafos import legacy_statistics
 from custom_components.novafos import update_listener
 from custom_components.novafos.config_flow import OptionsFlowHandler
 from custom_components.novafos.const import DOMAIN
-from custom_components.novafos.const import (
-    HEATING_SENSOR_TYPES,
-    EXTRA_HEATING_SENSOR_TYPES,
-)
 from custom_components.novafos.coordinator import (
     NovafosUpdateCoordinator,
 )
@@ -405,7 +399,10 @@ async def test_external_consumption_trends_across_calendar_boundaries(
     )
     await hass.async_add_executor_job(recorder.block_till_done)
     coordinator = SimpleNamespace(
-        hass=hass, api=Mock(get_meter_types=Mock(return_value=[{"type": "water"}, {"type": "heating"}]))
+        hass=hass,
+        api=Mock(
+            get_meter_types=Mock(return_value=[{"type": "water"}, {"type": "heating"}])
+        ),
     )
     await NovafosUpdateCoordinator._insert_external_hourly_statistics(coordinator)
     await hass.async_add_executor_job(recorder.block_till_done)
@@ -422,3 +419,45 @@ async def test_external_consumption_trends_across_calendar_boundaries(
             {"change"},
         )
         assert [row["change"] for row in result[statistic_id]] == [24.0, 48.0]
+
+
+@pytest.mark.asyncio
+async def test_sum_before_reads_the_imported_unit(async_setup_recorder_instance, hass):
+    """A heating sensor shown in kWh must not turn an MWh anchor into kWh."""
+    recorder = await async_setup_recorder_instance(hass)
+    start = datetime(2026, 9, 30, tzinfo=ZoneInfo(hass.config.time_zone)).astimezone(
+        timezone.utc
+    )
+    statistic_id = "sensor.novafos_heating_statistics"
+    hass.states.async_set(
+        statistic_id,
+        "11.28",
+        {
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "state_class": "total",
+        },
+    )
+    recorder_statistics.async_import_statistics(
+        hass,
+        StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=None,
+            source="recorder",
+            statistic_id=statistic_id,
+            unit_class="energy",
+            unit_of_measurement="MWh",
+        ),
+        [StatisticData(start=start, state=0.002, sum=11.28)],
+    )
+    await hass.async_add_executor_job(recorder.block_till_done)
+    coordinator = SimpleNamespace(hass=hass)
+    point = start + timedelta(hours=1)
+
+    shown = await NovafosUpdateCoordinator._sum_before(coordinator, statistic_id, point)
+    assert shown == pytest.approx(11280.0)
+    imported = await NovafosUpdateCoordinator._sum_before(
+        coordinator, statistic_id, point, {"energy": "MWh"}
+    )
+    assert imported == pytest.approx(11.28)
