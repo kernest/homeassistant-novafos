@@ -1,7 +1,14 @@
 - InstallationId: 56781234
   MeasurementPointId: 66774455
+  MeterTypeId: null
   Unit:
     Decimals: 0
+    Description: Vand
+    Id: 32113
+    Name: m³
+    Order: 1
+  Units:
+  - Decimals: 0
     Description: Vand
     Id: 32113
     Name: m³
@@ -9,8 +16,15 @@
   type: water
 - InstallationId: 12345678
   MeasurementPointId: 44556677
+  MeterTypeId: null
   Unit:
     Decimals: 0
+    Description: Varme
+    Id: 11332
+    Name: m³
+    Order: 1
+  Units:
+  - Decimals: 0
     Description: Varme
     Id: 11332
     Name: m³

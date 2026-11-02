@@ -27,3 +27,6 @@ class NovafosSensorDescription(SensorEntityDescription):
     """
 
     sensor_type: str | None = None
+    # Cooling report sensors: "year" or "day" row, and the value to show.
+    summary_period: str | None = None
+    summary_value: str | None = None

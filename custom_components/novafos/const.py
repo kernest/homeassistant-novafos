@@ -7,6 +7,8 @@ from typing import Final
 from homeassistant.components.sensor import SensorStateClass
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.const import UnitOfEnergy
+from homeassistant.const import UnitOfTemperature
+from homeassistant.const import UnitOfTime
 from homeassistant.const import UnitOfVolume
 
 from .model import NovafosSensorDescription
@@ -54,6 +56,38 @@ def meter_unit(meter_device: dict) -> tuple[str, str, SensorDeviceClass | None]:
         return unit, unit_class, SensorDeviceClass.ENERGY
     # Heating measured as a volume of hot water.
     return unit, unit_class, SensorDeviceClass.VOLUME
+
+
+# Units a KMD meter keeps besides its billing unit.  customerActiveMeters only
+# names some of them; the ids below were identified for Hillerød Forsyning's
+# heat meters by comparing yearly totals with the cooling report: MWh-F and
+# MWh-R divided by the volume give the volume weighted supply and return
+# temperature (MWh / m³ / 0.001163 = °C).
+# Unit id -> (statistic key, unit of measurement, recorder unit class)
+_DETAIL_UNITS: Final = {
+    1883: ("volume", UnitOfVolume.CUBIC_METERS, "volume"),
+    1892: ("operating_hours", UnitOfTime.HOURS, "duration"),
+    16201403: ("supply_energy", "MWh-F", None),
+    16201404: ("return_energy", "MWh-R", None),
+}
+
+
+def detail_unit(unit: dict) -> tuple[str, str | None, str | None]:
+    """Return (statistic key, unit, unit class) for an extra meter unit."""
+    if unit.get("Id") in _DETAIL_UNITS:
+        return _DETAIL_UNITS[unit["Id"]]
+    name = str(unit.get("Name") or "").strip()
+    return f"unit_{unit.get('Id')}", name or None, None
+
+
+# Hourly mean statistics imported from a heat meter's cooling report.
+COOLING_STATISTICS: Final = {
+    "supply_temperature": "supply temperature",
+    "return_temperature": "return temperature",
+    "cooling": "cooling",
+    "return_temperature_year": "return temperature year to date",
+    "return_requirement": "required return temperature",
+}
 
 
 # Optional static price per unit (for example DKK per m³), per meter type.
@@ -217,5 +251,105 @@ EXTRA_HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:lightning-bolt-circle",
         state_class=SensorStateClass.TOTAL,
+    ),
+)
+
+
+def _cooling_sensor(period, value, name, unit, device_class, icon):
+    return NovafosSensorDescription(
+        sensor_type="heating",
+        key=f"cooling_{period}_{value}",
+        name=name,
+        entity_registry_enabled_default=True,
+        native_unit_of_measurement=unit,
+        suggested_display_precision=1,
+        device_class=device_class,
+        icon=icon,
+        state_class=SensorStateClass.MEASUREMENT,
+        summary_period=period,
+        summary_value=value,
+    )
+
+
+_TEMPERATURE = (UnitOfTemperature.CELSIUS, SensorDeviceClass.TEMPERATURE)
+
+# From the cooling report: this year so far, as the utility settles it, and
+# the latest day KMD has data for.  return_margin is the required return
+# temperature minus this year's return temperature; below zero costs money.
+COOLING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
+    _cooling_sensor(
+        "year",
+        "supply_temperature",
+        "Heating supply temperature this year",
+        *_TEMPERATURE,
+        "mdi:thermometer-chevron-up",
+    ),
+    _cooling_sensor(
+        "year",
+        "return_temperature",
+        "Heating return temperature this year",
+        *_TEMPERATURE,
+        "mdi:thermometer-chevron-down",
+    ),
+    _cooling_sensor(
+        "year",
+        "return_requirement",
+        "Heating required return temperature",
+        *_TEMPERATURE,
+        "mdi:thermometer-alert",
+    ),
+    _cooling_sensor(
+        "year",
+        "return_margin",
+        "Heating return temperature margin",
+        UnitOfTemperature.CELSIUS,
+        None,
+        "mdi:thermometer-check",
+    ),
+    _cooling_sensor(
+        "year",
+        "cooling",
+        "Heating cooling this year",
+        UnitOfTemperature.CELSIUS,
+        None,
+        "mdi:thermometer-minus",
+    ),
+    _cooling_sensor(
+        "year",
+        "volume",
+        "Heating volume this year",
+        UnitOfVolume.CUBIC_METERS,
+        None,
+        "mdi:water-thermometer",
+    ),
+    _cooling_sensor(
+        "day",
+        "supply_temperature",
+        "Heating supply temperature latest day",
+        *_TEMPERATURE,
+        "mdi:thermometer-chevron-up",
+    ),
+    _cooling_sensor(
+        "day",
+        "return_temperature",
+        "Heating return temperature latest day",
+        *_TEMPERATURE,
+        "mdi:thermometer-chevron-down",
+    ),
+    _cooling_sensor(
+        "day",
+        "cooling",
+        "Heating cooling latest day",
+        UnitOfTemperature.CELSIUS,
+        None,
+        "mdi:thermometer-minus",
+    ),
+    _cooling_sensor(
+        "day",
+        "volume",
+        "Heating volume latest day",
+        UnitOfVolume.CUBIC_METERS,
+        None,
+        "mdi:water-thermometer",
     ),
 )

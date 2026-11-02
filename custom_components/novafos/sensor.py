@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import (
+    COOLING_SENSOR_TYPES,
     DOMAIN,
     WATER_SENSOR_TYPES,
     HEATING_SENSOR_TYPES,
@@ -72,8 +73,46 @@ async def async_setup_entry(
         if use_grouped_sensors:
             for description in EXTRA_HEATING_SENSOR_TYPES:
                 sensors.append(NovafosWaterSensor(name, coordinator, description))
+        for description in COOLING_SENSOR_TYPES:
+            sensors.append(NovafosCoolingSensor(name, coordinator, description))
 
     async_add_entities(sensors)
+
+
+class NovafosCoolingSensor(CoordinatorEntity, SensorEntity):
+    """A value from the heat meter's cooling report (year so far or latest day)."""
+
+    entity_description: NovafosSensorDescription
+
+    def __init__(self, name, coordinator, description):
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_name = f"{name} {description.name}"
+        self._attr_unique_id = (
+            f"{name.lower()}-{description.sensor_type}-{description.key}"
+        )
+
+    def _row(self) -> dict | None:
+        summary = self.coordinator.cooling_summary or {}
+        return summary.get(self.entity_description.summary_period)
+
+    @property
+    def native_value(self) -> StateType:
+        row = self._row()
+        if not row:
+            return None
+        if self.entity_description.summary_value == "return_margin":
+            if row["return_requirement"] is None or row["return_temperature"] is None:
+                return None
+            return round(row["return_requirement"] - row["return_temperature"], 1)
+        return row.get(self.entity_description.summary_value)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        row = self._row()
+        if row and row.get("date"):
+            return {"date": row["date"]}
+        return {}
 
 
 class NovafosWaterSensor(CoordinatorEntity, SensorEntity):

@@ -30,6 +30,10 @@ version in the HACS default store. Changes in this fork:
 * **Heating units.** The unit KMD reports for the heating meter (kWh, MWh, GJ or
   m³) is used instead of always kWh.
 * **Latest hour sensors** and a clear error when the access token has expired.
+* **District heating cooling.** The meter's extra hourly units (volume, operating
+  hours, supply and return energy) and the portal's cooling report (supply and
+  return temperature, required return temperature) are imported too, see
+  [District heating details](#district-heating-details).
 * **Token renewer.** A Docker service that keeps the access token fresh, see
   [Login methods](#login-methods).
 
@@ -187,6 +191,47 @@ arithmetic min/mean/max and change without changing the Energy dashboard's senso
 The main sensor also exposes a `year_total` attribute when yearly data is available.
 
 Under consideration is adding attributes for some sort of high/low warning so that an indication for high water use or never having zero flow could be flagged.  You can add a helper which flags if the `min` is ever rising above 0.0.
+
+## District heating details
+
+Many utilities charge for poor cooling: the return temperature must stay below a
+limit that depends on the supply temperature. KMD keeps the data for this, and
+the integration imports all of it with the same rolling 31-day window and
+background full-history import as the consumption.
+
+**Extra meter units.** Besides the unit it is billed in, a heat meter reports
+more hourly series. Each becomes a cumulative external statistic
+`novafos:heating_<key>`:
+
+| Statistic | Unit | Meaning |
+|---|---|---|
+| `novafos:heating_volume` | m³ | Hot water through the meter |
+| `novafos:heating_operating_hours` | h | Hours the meter measured |
+| `novafos:heating_supply_energy` | MWh-F | Volume × supply temperature |
+| `novafos:heating_return_energy` | MWh-R | Volume × return temperature |
+
+For any period, `supply_energy` or `return_energy` divided by `volume` and by
+0.001163 is the volume weighted supply or return temperature in °C, the same
+average the utility settles against. The unit ids were identified for
+Hillerød Forsyning; other units a meter reports are imported as
+`novafos:<type>_unit_<id>`.
+
+**Cooling report.** The portal's "Afkøling" page becomes hourly mean
+statistics `novafos:heating_supply_temperature`, `..._return_temperature`,
+`..._cooling`, `..._return_temperature_year` (year to date) and
+`..._return_requirement`. KMD derives `cooling` from energy and volume, so it is
+coarse at hourly resolution. On the autumn daylight saving change KMD reports
+24 hours, so one hour is missing.
+
+**Sensors.** `Heating ... this year` show the year so far as the utility
+settles it (supply and return temperature, required return temperature,
+cooling, volume), `Heating return temperature margin` is the required minus the
+actual return temperature (below zero costs money), and `Heating ... latest
+day` show the most recent day KMD has data for, with the day in the `date`
+attribute.
+
+KMD also has water and heating consumption at 15-minute resolution. It is not
+imported, because Home Assistant keeps long-term statistics per hour.
 
 # Visualisation of the sensors using built-in cards
 

@@ -48,6 +48,9 @@ class Novafos:
         self._meter_data_extra = {}
         self._meter_data_grouped = {}
         self._last_valid_day = None
+        # Raw availableTimeSeriesPeriods response; also lists units that
+        # customerActiveMeters leaves out.  None until first fetched.
+        self._time_series_periods = None
 
         # NOTE: Added because of reCAPCTHA login screen
         self._access_token_date_updated = ""
@@ -222,7 +225,9 @@ class Novafos:
                     "type": "water",
                     "InstallationId": meter["InstallationId"],
                     "MeasurementPointId": meter["MeasurementPointId"],
+                    "MeterTypeId": meter.get("MeterTypeId"),
                     "Unit": meter["Units"][0],
+                    "Units": meter["Units"],
                 }
                 self._meter_data["water"] = []
                 self._meter_data_extra["water"] = []
@@ -233,7 +238,9 @@ class Novafos:
                     "type": "heating",
                     "InstallationId": meter["InstallationId"],
                     "MeasurementPointId": meter["MeasurementPointId"],
+                    "MeterTypeId": meter.get("MeterTypeId"),
                     "Unit": meter["Units"][0],
+                    "Units": meter["Units"],
                 }
                 self._meter_data["heating"] = []
                 self._meter_data_extra["heating"] = []
@@ -277,6 +284,7 @@ class Novafos:
             _LOGGER.error("Failed to retrieve available time periods: %s", req_err)
             raise HTTPFailed from req_err
         result_json = response.json()
+        self._time_series_periods = result_json or []
 
         # Enable logging DEBUG to see all returned data from the API:
         self._print_json(
@@ -619,6 +627,210 @@ class Novafos:
             if abs(hourly - total) > max(0.001, abs(total) * 0.01):
                 return True
         return False
+
+    def get_detail_units(self, meter_type) -> list[dict]:
+        """Return the meter's units other than the one it is billed in.
+
+        customerActiveMeters only names some units (for a Hillerød heat meter
+        MWh and MWh-F).  availableTimeSeriesPeriods lists every unit with
+        hourly data for the measurement point, so both are combined.  An
+        unnamed unit gets a placeholder that consumptionTimeSeries accepts.
+        """
+        meter = next((m for m in self._active_meters if m["type"] == meter_type), None)
+        if meter is None:
+            return []
+        if self._time_series_periods is None:
+            self.get_available_time_series_periods()
+        named = {unit["Id"]: unit for unit in meter.get("Units", [])}
+        listed = {
+            period["UnitId"]
+            for period in self._time_series_periods or []
+            if period.get("RangeType") == 0
+            and period.get("MeasurementPointId") == meter["MeasurementPointId"]
+            and period.get("UnitId")
+        }
+        return [
+            named.get(
+                unit_id,
+                {
+                    "Id": unit_id,
+                    "Name": "",
+                    "Description": "",
+                    "Decimals": 3,
+                    "Order": 99,
+                },
+            )
+            for unit_id in sorted(listed | set(named))
+            if unit_id != meter["Unit"]["Id"]
+        ]
+
+    def get_unit_statistics(self, meter_type, unit, from_date) -> list[dict]:
+        """Hourly values of one unit of a meter from local from_date until today.
+
+        One request per day, for the same reason as get_statistics.
+        Returns [{'DateFrom': <local iso>, 'Value': <float>}, ...].
+        """
+        meter = next(m for m in self._active_meters if m["type"] == meter_type)
+        device = {**meter, "Unit": unit}
+        day = from_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        points = []
+        while day < today:
+            next_day = day + timedelta(days=1)
+            series = self._get_consumption_timeseries(
+                device,
+                self._utc_to_isostr(self._local_to_utc(day)),
+                self._utc_to_isostr(
+                    self._local_to_utc(next_day - timedelta(seconds=1))
+                ),
+                self._zoom_level["Hour"],
+            )
+            points.extend(series["Data"])
+            day = next_day
+        return points
+
+    # The cooling report counts zoom levels from 1, the consumption API from 0.
+    _COOLING_ZOOM = {"Year": 1, "Month": 2, "Day": 3, "Hour": 4}
+
+    @staticmethod
+    def _number(value) -> float | None:
+        """KMD sends missing cooling values as null or the string 'NaN'."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return None if number != number else number
+
+    @classmethod
+    def _cooling_values(cls, row) -> dict:
+        """Name the fields of one cooling report row.
+
+        DegreesIn/DegreesOut are the meter's supply and return temperature.
+        Degrees is KMD's cooling, derived from energy and volume, so at hourly
+        resolution it is coarse.  DegreesAccumulated and DegreesPenalty are
+        the year-to-date return temperature and the return temperature the
+        utility requires, both as of the end of the row's period.
+        """
+        return {
+            "supply_temperature": cls._number(row.get("DegreesIn")),
+            "return_temperature": cls._number(row.get("DegreesOut")),
+            "cooling": cls._number(row.get("Degrees")),
+            "return_temperature_year": cls._number(row.get("DegreesAccumulated")),
+            "return_requirement": cls._number(row.get("DegreesPenalty")),
+            "volume": cls._number(row.get("Flow")),
+            "energy": cls._number(row.get("Energy")),
+        }
+
+    def _get_cooling_info(self, meter, zoom, start, stop) -> list[dict]:
+        """Return the cooling report rows for local start up to local stop.
+
+        KMD answers with one period of the requested zoom level that starts
+        at DateFrom: a whole year of months, a month of days or a day of
+        hours, however long the requested range is.
+        """
+        headers = {
+            "Customer-Id": self._customer_id,
+            "Customer-Number": self._customer_number,
+            "Authorization": self._access_token,
+        }
+        data = {
+            "MetertypeId": meter["MeterTypeId"],
+            "MeasurementPointId": meter["MeasurementPointId"],
+            "ZoomLevel": zoom,
+            "DateFrom": self._utc_to_isostr(self._local_to_utc(start)),
+            "DateTo": self._utc_to_isostr(
+                self._local_to_utc(stop - timedelta(seconds=1))
+            ),
+        }
+        url = f"{self._api_url}/api/cooling/getcoolinginfo"
+        try:
+            response = requests.post(
+                url, json=data, headers=headers, timeout=self._request_timeout
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as req_err:
+            _LOGGER.error(
+                "Failed to retrieve cooling data for %s to %s: %s", start, stop, req_err
+            )
+            raise HTTPFailed from req_err
+        result_json = response.json()
+        self._print_json(result_json, "Retrieved cooling JSON response")
+        if not result_json.get("IsSuccess", True):
+            raise HTTPFailed(result_json.get("ErrorMessage"))
+        return result_json.get("CoolingData") or []
+
+    def _heating_meter(self):
+        return next((m for m in self._active_meters if m["type"] == "heating"), None)
+
+    def get_cooling_hourly(self, from_date) -> list[dict]:
+        """Hourly cooling report from local from_date until today.
+
+        Returns [{'DateFrom': <local iso>, 'supply_temperature': ..., ...}]
+        with hours KMD has no reading for left out.  The rows only carry an
+        hour number, so on the autumn daylight saving change KMD's 24 rows
+        cover 25 hours and the repeated hour is lost.
+        """
+        meter = self._heating_meter()
+        if meter is None:
+            return []
+        day = from_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = []
+        while day < today:
+            next_day = day + timedelta(days=1)
+            for row in self._get_cooling_info(
+                meter, self._COOLING_ZOOM["Hour"], day, next_day
+            ):
+                values = self._cooling_values(row)
+                if values["return_temperature"] is None:
+                    continue
+                start = day + timedelta(hours=int(row["Period"]))
+                rows.append({"DateFrom": start.isoformat(), **values})
+            day = next_day
+        return rows
+
+    def get_cooling_summary(self) -> dict | None:
+        """Return this year's cooling and the latest day KMD has data for.
+
+        {'year': {<values>}, 'day': {<values>, 'date': 'YYYY-MM-DD'}}.  The
+        year row's return temperature is the volume weighted average the
+        utility settles against; its DegreesAccumulated is empty.
+        """
+        meter = self._heating_meter()
+        if meter is None:
+            return None
+        now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        year_start = now.replace(month=1, day=1)
+        year = None
+        for row in self._get_cooling_info(
+            meter,
+            self._COOLING_ZOOM["Year"],
+            year_start,
+            year_start.replace(year=now.year + 1),
+        ):
+            if str(row.get("Period")) == str(now.year):
+                year = self._cooling_values(row)
+                year["return_temperature_year"] = year["return_temperature"]
+
+        # Early in a month the latest day with data is in the month before.
+        day = None
+        month_start = now.replace(day=1)
+        for start in (month_start, (month_start - timedelta(days=1)).replace(day=1)):
+            stop = (start + timedelta(days=32)).replace(day=1)
+            rows = [
+                row
+                for row in self._get_cooling_info(
+                    meter, self._COOLING_ZOOM["Day"], start, stop
+                )
+                if self._number(row.get("DegreesOut")) is not None
+            ]
+            if rows:
+                day = self._cooling_values(rows[-1])
+                day["date"] = (
+                    start.replace(day=int(rows[-1]["Period"])).date().isoformat()
+                )
+                break
+        return {"year": year, "day": day}
 
     def get_year_data(self):
         """

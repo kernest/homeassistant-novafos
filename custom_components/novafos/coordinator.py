@@ -16,16 +16,19 @@ from datetime import timedelta
 
 
 from .const import (
+    COOLING_STATISTICS,
     DOMAIN,
     HISTORY_RECONCILIATION_KEY,
     RECONCILIATION_TOLERANCE_ABS,
     RECONCILIATION_TOLERANCE_REL,
     STATISTICS_LOOKBACK_DAYS,
+    detail_unit,
     meter_unit,
     price_option,
     prices_option,
 )
 from .legacy_statistics import async_import_grouped_statistics
+from .pynovafos.novafos import HTTPFailed
 from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN, get_instance
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -80,6 +83,10 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         self._auto_reconciled = False
         # Same for the one full import that creates the cost history.
         self._cost_reconciled = False
+        # And for the one that creates the extra unit statistics.
+        self._details_reconciled = False
+        # This year's and the latest day's cooling report, for the sensors.
+        self.cooling_summary: dict | None = None
         # The full history import makes one KMD request per day and meter and
         # can take minutes, longer than Home Assistant allows setup to block.
         # It runs as a background task; the lock keeps it and regular
@@ -429,6 +436,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             if abs(ha_year_total - kmd_year_total) > tolerance:
                 mismatched_meters.append((meter_type, ha_year_total, kmd_year_total))
 
+        await self._import_meter_details(fetch_start, full_history, meter_year_data)
+
         if mismatched_meters:
             details = ", ".join(
                 f"{meter_type}: Home Assistant {ha:.3f} vs KMD {kmd:.3f}"
@@ -537,6 +546,151 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             unit_of_measurement=self.hass.config.currency,
         )
         async_add_external_statistics(self.hass, metadata, cost_statistics)
+
+    async def _import_meter_details(
+        self, fetch_start, full_history, meter_year_data
+    ) -> None:
+        """Import the extra hourly series KMD keeps for each meter.
+
+        Every unit besides the billing unit becomes the cumulative external
+        statistic novafos:<type>_<key>, and a heat meter's cooling report
+        becomes hourly mean statistics novafos:heating_<value>.  They follow
+        the consumption: the same rolling window anchored to the sum before
+        it, or all history during a full import.  A failure here is logged
+        and does not stop the consumption import.
+        """
+        time_zone = dt_util.get_time_zone(self.hass.config.time_zone)
+        window_start = fetch_start.replace(tzinfo=time_zone)
+        for meter_device in self.api.get_meter_types():
+            meter_type = meter_device["type"]
+            try:
+                units = await self.hass.async_add_executor_job(
+                    self.api.get_detail_units, meter_type
+                )
+                for unit in units:
+                    await self._import_detail_unit(
+                        meter_type,
+                        unit,
+                        fetch_start,
+                        window_start,
+                        full_history,
+                        meter_year_data,
+                    )
+            except HTTPFailed:
+                _LOGGER.warning(
+                    "Could not import the extra %s units from KMD", meter_type
+                )
+
+        if not any(m["type"] == "heating" for m in self.api.get_meter_types()):
+            return
+        if not full_history and not self._details_reconciled:
+            stored = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics,
+                self.hass,
+                1,
+                f"{DOMAIN}:heating_return_temperature",
+                True,
+                {"mean"},
+            )
+            if not stored:
+                self._details_reconciled = True
+                _LOGGER.info(
+                    "No stored cooling report yet; importing all history in the background"
+                )
+                self._schedule_full_history(meter_year_data)
+        try:
+            rows = await self.hass.async_add_executor_job(
+                self.api.get_cooling_hourly, fetch_start
+            )
+            self.cooling_summary = await self.hass.async_add_executor_job(
+                self.api.get_cooling_summary
+            )
+        except HTTPFailed:
+            _LOGGER.warning("Could not import the cooling report from KMD")
+            return
+        for key, label in COOLING_STATISTICS.items():
+            statistics = [
+                StatisticData(
+                    start=dt_util.parse_datetime(row["DateFrom"]).replace(
+                        tzinfo=time_zone
+                    ),
+                    mean=row[key],
+                    min=row[key],
+                    max=row[key],
+                )
+                for row in rows
+                if row[key] is not None
+            ]
+            if not statistics:
+                continue
+            async_add_external_statistics(
+                self.hass,
+                StatisticMetaData(
+                    mean_type=StatisticMeanType.ARITHMETIC,
+                    has_sum=False,
+                    name=f"Novafos heating {label}",
+                    source=DOMAIN,
+                    statistic_id=f"{DOMAIN}:heating_{key}",
+                    unit_class="temperature",
+                    unit_of_measurement="°C",
+                ),
+                statistics,
+            )
+
+    async def _import_detail_unit(
+        self, meter_type, unit, fetch_start, window_start, full_history, meter_year_data
+    ) -> None:
+        """Import one extra unit as a cumulative statistic."""
+        key, unit_of_measurement, unit_class = detail_unit(unit)
+        statistic_id = f"{DOMAIN}:{meter_type}_{key}"
+        if full_history:
+            _sum = 0.0
+        else:
+            _sum = await self._sum_before(statistic_id, window_start)
+            if _sum is None:
+                # Like the cost: build the whole history once, in the
+                # background, rather than starting this sum at zero here.
+                if not self._details_reconciled:
+                    self._details_reconciled = True
+                    _LOGGER.info(
+                        "No stored %s yet; importing all history in the background",
+                        statistic_id,
+                    )
+                    self._schedule_full_history(meter_year_data)
+                return
+        points = await self.hass.async_add_executor_job(
+            self.api.get_unit_statistics, meter_type, unit, fetch_start
+        )
+        statistics = []
+        time_zone = dt_util.get_time_zone(self.hass.config.time_zone)
+        for point in points:
+            value = point["Value"] or 0.0
+            _sum += value
+            statistics.append(
+                StatisticData(
+                    start=dt_util.parse_datetime(f"{point['DateFrom']}").replace(
+                        tzinfo=time_zone
+                    ),
+                    state=value,
+                    sum=_sum,
+                )
+            )
+        if not statistics:
+            return
+        description = unit.get("Description") or unit.get("Name") or key
+        async_add_external_statistics(
+            self.hass,
+            StatisticMetaData(
+                mean_type=StatisticMeanType.NONE,
+                has_sum=True,
+                name=f"Novafos {meter_type} {description if key.startswith('unit_') else key.replace('_', ' ')}",
+                source=DOMAIN,
+                statistic_id=statistic_id,
+                unit_class=unit_class,
+                unit_of_measurement=unit_of_measurement,
+            ),
+            statistics,
+        )
 
     @staticmethod
     def _kmd_year_total(meter_year_data, meter_type) -> float | None:
