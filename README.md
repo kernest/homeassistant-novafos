@@ -21,7 +21,9 @@ version in the HACS default store. Changes in this fork:
   background so Home Assistant starts normally.
 * **Self-correcting statistics.** Every refresh re-imports the last 31 days.
   When Home Assistant's year-to-date total differs from KMD's, the full history
-  is re-imported automatically.
+  is re-imported automatically. If KMD returns nothing for the first part of
+  that history, the import continues the sum already stored instead of
+  restarting it from zero.
 * **Energy dashboard.** The consumption is imported as the external statistics
   `novafos:water_consumption` and `novafos:heating_consumption`, which the
   Energy dashboard can use without recorder interfering.

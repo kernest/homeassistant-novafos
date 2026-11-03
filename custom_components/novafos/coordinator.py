@@ -340,6 +340,18 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 )
                 continue
 
+            anchored = False
+            if full_history:
+                anchor = await self._late_start_anchor(
+                    statistic_id,
+                    data[meter_type][0]["DateFrom"],
+                    fetch_start,
+                    {unit_class: unit},
+                )
+                if anchor is not None:
+                    _sum = anchor
+                    anchored = True
+
             # Array of statistics points
             statistics = []
 
@@ -431,11 +443,12 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             first_imported = dt_util.parse_datetime(
                 f"{data[meter_type][0]['DateFrom']}"
             ).replace(tzinfo=dt_util.get_time_zone(self.hass.config.time_zone))
-            if not full_history and first_imported > year_start:
+            if (not full_history or anchored) and first_imported > year_start:
                 # A rolling window that starts after 1 January: the sum before
                 # the year comes from rows recorder already holds.  A full
                 # import restarts the sum at zero, so older recorder rows must
                 # not be used; the in-memory value above is correct there.
+                # The exception is a full import anchored to older rows.
                 sum_before_year = await self._sum_before(
                     statistic_id, year_start, {unit_class: unit}
                 )
@@ -710,6 +723,12 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         points = await self.hass.async_add_executor_job(
             self.api.get_unit_statistics, meter_type, unit, fetch_start
         )
+        if full_history and points:
+            anchor = await self._late_start_anchor(
+                statistic_id, points[0]["DateFrom"], fetch_start
+            )
+            if anchor is not None:
+                _sum = anchor
         statistics = []
         time_zone = dt_util.get_time_zone(self.hass.config.time_zone)
         for point in points:
@@ -740,6 +759,33 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             ),
             statistics,
         )
+
+    async def _late_start_anchor(
+        self, statistic_id, first_date_from, fetch_start, units=None
+    ) -> float | None:
+        """Return the stored sum to continue a full import that starts late.
+
+        A full import restarts a sum at zero from fetch_start.  When KMD
+        returns nothing for the first days (on 2026-11-03 hourly consumption
+        before 6 March came back empty), the sum would restart at the first
+        returned hour and every later row would lose the older consumption.
+        Returns None when the data starts on time or nothing is stored.
+        """
+        time_zone = dt_util.get_time_zone(self.hass.config.time_zone)
+        first = dt_util.parse_datetime(f"{first_date_from}").replace(tzinfo=time_zone)
+        start = fetch_start.replace(tzinfo=time_zone)
+        if first - start <= timedelta(days=1):
+            return None
+        anchor = await self._sum_before(statistic_id, first, units)
+        if anchor is not None:
+            _LOGGER.warning(
+                "KMD returned %s from %s, not %s; continuing the stored sum %.3f",
+                statistic_id,
+                first,
+                start,
+                anchor,
+            )
+        return anchor
 
     @staticmethod
     def _kmd_year_total(meter_year_data, meter_type) -> float | None:

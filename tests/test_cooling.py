@@ -245,8 +245,11 @@ def make_coordinator(monkeypatch, api, sums):
         _schedule_full_history=Mock(),
         _clear_unfiltered_cooling=AsyncMock(return_value=False),
         _sum_before=AsyncMock(
-            side_effect=lambda statistic_id, point: sums.get(statistic_id)
+            side_effect=lambda statistic_id, point, units=None: sums.get(statistic_id)
         ),
+    )
+    coordinator._late_start_anchor = lambda *args: (
+        NovafosUpdateCoordinator._late_start_anchor(coordinator, *args)
     )
     coordinator._import_detail_unit = lambda *args: (
         NovafosUpdateCoordinator._import_detail_unit(coordinator, *args)
@@ -463,3 +466,44 @@ async def test_cleared_cooling_schedules_a_full_import(monkeypatch):
         coordinator, datetime(2026, 10, 2), False, {}
     )
     coordinator._schedule_full_history.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_full_import_that_starts_late_continues_the_stored_sum(monkeypatch):
+    api = fake_api()
+    coordinator, added = make_coordinator(
+        monkeypatch, api, {"novafos:heating_volume": 250.0}
+    )
+    # KMD returned nothing before 29 October although 1 January was asked for.
+    await NovafosUpdateCoordinator._import_meter_details(
+        coordinator, datetime(2026, 1, 1), True, {}
+    )
+    rows = next(
+        call.args[2]
+        for call in added.call_args_list
+        if call.args[1]["statistic_id"] == "novafos:heating_volume"
+    )
+    assert rows[0]["sum"] == pytest.approx(250.08)
+
+
+@pytest.mark.asyncio
+async def test_late_start_anchor_only_for_late_data():
+    coordinator = SimpleNamespace(
+        hass=SimpleNamespace(config=SimpleNamespace(time_zone="Europe/Copenhagen")),
+        _sum_before=AsyncMock(return_value=7.266),
+    )
+
+    def anchor(first):
+        return NovafosUpdateCoordinator._late_start_anchor(
+            coordinator, "sensor.x", first, datetime(2026, 1, 1), {"energy": "MWh"}
+        )
+
+    assert await anchor("2026-01-01T00:00:00") is None
+    coordinator._sum_before.assert_not_called()
+    assert await anchor("2026-03-06T00:00:00") == 7.266
+    point = coordinator._sum_before.call_args.args[1]
+    assert point.isoformat() == "2026-03-06T00:00:00+01:00"
+    assert coordinator._sum_before.call_args.args[2] == {"energy": "MWh"}
+
+    coordinator._sum_before.return_value = None
+    assert await anchor("2026-03-06T00:00:00") is None
