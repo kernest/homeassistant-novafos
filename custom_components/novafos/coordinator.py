@@ -16,6 +16,7 @@ from datetime import timedelta
 
 
 from .const import (
+    COOLING_FILTER_VERSION,
     COOLING_STATISTICS,
     DOMAIN,
     HISTORY_RECONCILIATION_KEY,
@@ -41,6 +42,7 @@ from homeassistant.components.recorder.statistics import (
     async_import_statistics,
     async_add_external_statistics,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from typing import cast
 
@@ -85,6 +87,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         self._cost_reconciled = False
         # And for the one that creates the extra unit statistics.
         self._details_reconciled = False
+        # Set once the stored cooling statistics have been checked against
+        # COOLING_FILTER_VERSION on this run.
+        self._cooling_filter_checked = False
         # This year's and the latest day's cooling report, for the sensors.
         self.cooling_summary: dict | None = None
         # The full history import makes one KMD request per day and meter and
@@ -588,7 +593,10 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
 
         if not any(m["type"] == "heating" for m in self.api.get_meter_types()):
             return
-        if not full_history and not self._details_reconciled:
+        if not full_history and await self._clear_unfiltered_cooling():
+            self._details_reconciled = True
+            self._schedule_full_history(meter_year_data)
+        elif not full_history and not self._details_reconciled:
             stored = await get_instance(self.hass).async_add_executor_job(
                 get_last_statistics,
                 self.hass,
@@ -641,6 +649,31 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 ),
                 statistics,
             )
+
+    async def _clear_unfiltered_cooling(self) -> bool:
+        """Clear cooling statistics imported before the low flow filter.
+
+        Re-importing only overwrites the hours it imports, so hours an older
+        version stored and the current one skips would stay.  Returns True
+        when the statistics were cleared and need a full import.  The clear
+        is queued in the recorder ahead of that import.
+        """
+        if self._cooling_filter_checked:
+            return False
+        self._cooling_filter_checked = True
+        store = Store(self.hass, 1, f"{DOMAIN}.{self.entry.entry_id}.cooling")
+        saved = await store.async_load() or {}
+        if saved.get("filter") == COOLING_FILTER_VERSION:
+            return False
+        _LOGGER.info(
+            "Clearing the cooling statistics to import them again with the "
+            "low flow filter"
+        )
+        get_instance(self.hass).async_clear_statistics(
+            [f"{DOMAIN}:heating_{key}" for key in COOLING_STATISTICS]
+        )
+        await store.async_save({"filter": COOLING_FILTER_VERSION})
+        return True
 
     async def _import_detail_unit(
         self, meter_type, unit, fetch_start, window_start, full_history, meter_year_data

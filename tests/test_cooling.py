@@ -31,7 +31,7 @@ HEAT_METER = {
 }
 
 
-def cooling_row(period, flow=0.05, supply=58.0, ret=30.0):
+def cooling_row(period, flow=0.2, supply=58.0, ret=30.0):
     return {
         "Period": period,
         "Flow": flow,
@@ -140,6 +140,21 @@ def test_cooling_hourly_fetches_one_day_per_request(mocker, api):
     assert rows[1]["return_requirement"] == 44.9
 
 
+def test_cooling_hourly_skips_low_flow_hours(mocker, api):
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    mocker.patch.object(
+        api,
+        "_get_cooling_info",
+        return_value=[
+            cooling_row("0", flow=0.002, ret=430.0),
+            cooling_row("1", flow=0.004, ret=0.0),
+            cooling_row("2", flow=0.1, ret=33.0),
+        ],
+    )
+    rows = api.get_cooling_hourly(today - timedelta(days=1))
+    assert [row["return_temperature"] for row in rows] == [33.0]
+
+
 def test_cooling_summary_falls_back_to_previous_month(mocker, api):
     now = datetime.now()
 
@@ -227,6 +242,7 @@ def make_coordinator(monkeypatch, api, sums):
         _details_reconciled=False,
         cooling_summary=None,
         _schedule_full_history=Mock(),
+        _clear_unfiltered_cooling=AsyncMock(return_value=False),
         _sum_before=AsyncMock(
             side_effect=lambda statistic_id, point: sums.get(statistic_id)
         ),
@@ -374,3 +390,55 @@ def test_cooling_sensors():
         is None
     )
     assert make_cooling_sensor("cooling_year_return_margin", None).native_value is None
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_cooling_statistics_are_cleared_once(monkeypatch):
+    saved = {}
+
+    class FakeStore:
+        def __init__(self, hass, version, key):
+            self.key = key
+
+        async def async_load(self):
+            return saved.get(self.key)
+
+        async def async_save(self, data):
+            saved[self.key] = data
+
+    recorder = Mock()
+    monkeypatch.setattr(coordinator_module, "Store", FakeStore)
+    monkeypatch.setattr(coordinator_module, "get_instance", Mock(return_value=recorder))
+
+    def run(coordinator):
+        return NovafosUpdateCoordinator._clear_unfiltered_cooling(coordinator)
+
+    first = SimpleNamespace(
+        hass=None, entry=SimpleNamespace(entry_id="e1"), _cooling_filter_checked=False
+    )
+    assert await run(first) is True
+    assert await run(first) is False
+    recorder.async_clear_statistics.assert_called_once()
+    cleared = recorder.async_clear_statistics.call_args.args[0]
+    assert "novafos:heating_return_temperature" in cleared
+    assert "novafos:heating_volume" not in cleared
+
+    # A later start finds the stored filter version and keeps the statistics.
+    later = SimpleNamespace(
+        hass=None, entry=SimpleNamespace(entry_id="e1"), _cooling_filter_checked=False
+    )
+    assert await run(later) is False
+    recorder.async_clear_statistics.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cleared_cooling_schedules_a_full_import(monkeypatch):
+    api = fake_api()
+    coordinator, added = make_coordinator(
+        monkeypatch, api, {"novafos:heating_volume": 100.0}
+    )
+    coordinator._clear_unfiltered_cooling = AsyncMock(return_value=True)
+    await NovafosUpdateCoordinator._import_meter_details(
+        coordinator, datetime(2026, 10, 2), False, {}
+    )
+    coordinator._schedule_full_history.assert_called_once()

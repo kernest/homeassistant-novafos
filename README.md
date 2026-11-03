@@ -219,9 +219,12 @@ Hillerød Forsyning; other units a meter reports are imported as
 **Cooling report.** The portal's "Afkøling" page becomes hourly mean
 statistics `novafos:heating_supply_temperature`, `..._return_temperature`,
 `..._cooling`, `..._return_temperature_year` (year to date) and
-`..._return_requirement`. KMD derives `cooling` from energy and volume, so it is
-coarse at hourly resolution. On the autumn daylight saving change KMD reports
-24 hours, so one hour is missing.
+`..._return_requirement`. KMD derives the hourly temperatures from the meter's
+energy and volume registers, which count in steps of 0.001, so they are coarse
+at hourly resolution. Hours with less than 0.1 m³ through the meter are left
+out: with a few litres an hour KMD reports 0 °C or several hundred degrees. Use
+`return_energy / volume` for exact averages. On the autumn daylight saving
+change KMD reports 24 hours, so one hour is missing.
 
 **Sensors.** `Heating ... this year` show the year so far as the utility
 settles it (supply and return temperature, required return temperature,

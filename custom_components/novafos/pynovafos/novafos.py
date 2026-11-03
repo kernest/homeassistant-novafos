@@ -691,6 +691,11 @@ class Novafos:
 
     # The cooling report counts zoom levels from 1, the consumption API from 0.
     _COOLING_ZOOM = {"Year": 1, "Month": 2, "Day": 3, "Hour": 4}
+    # KMD derives an hour's temperatures from the meter's MWh-F/MWh-R and m³
+    # registers, which count in steps of 0.001.  With a few litres an hour
+    # one step is tens of degrees, so a low flow hour reads 0 °C or e.g.
+    # 0.001 / (0.002 * 0.001163) = 430 °C.  At 0.1 m³ a step is 8.6 °C.
+    _COOLING_MIN_HOURLY_VOLUME = 0.1
 
     @staticmethod
     def _number(value) -> float | None:
@@ -766,7 +771,8 @@ class Novafos:
         """Hourly cooling report from local from_date until today.
 
         Returns [{'DateFrom': <local iso>, 'supply_temperature': ..., ...}]
-        with hours KMD has no reading for left out.  The rows only carry an
+        with hours KMD has no reading for, or too little flow for a
+        meaningful temperature, left out.  The rows only carry an
         hour number, so on the autumn daylight saving change KMD's 24 rows
         cover 25 hours and the repeated hour is lost.
         """
@@ -782,7 +788,11 @@ class Novafos:
                 meter, self._COOLING_ZOOM["Hour"], day, next_day
             ):
                 values = self._cooling_values(row)
-                if values["return_temperature"] is None:
+                if (
+                    values["return_temperature"] is None
+                    or values["volume"] is None
+                    or values["volume"] < self._COOLING_MIN_HOURLY_VOLUME
+                ):
                     continue
                 start = day + timedelta(hours=int(row["Period"]))
                 rows.append({"DateFrom": start.isoformat(), **values})
