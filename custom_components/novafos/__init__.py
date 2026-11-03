@@ -42,12 +42,6 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     )
     # Ensure the coordinator picks up the updated token/options
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    use_grouped_sensors = entry.options.get(
-        "use_grouped_sensors", entry.data.get("use_grouped_sensors", False)
-    )
-    if coordinator.use_grouped_sensors != use_grouped_sensors:
-        await hass.config_entries.async_reload(entry.entry_id)
-        return
     # Update coordinator local copies from the stored entry options
     coordinator.access_token = entry.options.get("access_token", "")
     coordinator.access_token_date_updated = entry.options.get(
@@ -61,7 +55,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug(f"Novafos ConfigData: {entry.data}")
 
     # Use the coordinator which handles regular fetch of API data.
-    api = Novafos(timezone=hass.config.time_zone)
+    api = Novafos(
+        timezone=hass.config.time_zone,
+        customer_id=entry.data.get("customer_id"),
+        measurement_point_id=entry.data.get("measurement_point_id"),
+    )
     coordinator = NovafosUpdateCoordinator(hass, api, entry)
     # If you do not want to retry setup on failure, use
     await coordinator.async_refresh()

@@ -19,8 +19,7 @@ from .const import (
     DOMAIN,
     WATER_SENSOR_TYPES,
     HEATING_SENSOR_TYPES,
-    EXTRA_WATER_SENSOR_TYPES,
-    EXTRA_HEATING_SENSOR_TYPES,
+    meter_statistics_key,
     meter_unit,
 )
 
@@ -37,6 +36,8 @@ async def async_setup_entry(
     """Set up the sensor platform."""
     # Use the name for the unique id of each sensor. novafos_<supplierid>?
     name: str = config.data[CONF_NAME]
+    if config.data.get("address"):
+        name = f"{name} {config.data['address']}"
     coordinator: DataUpdateCoordinator = hass.data[DOMAIN][config.entry_id][
         "coordinator"
     ]
@@ -46,9 +47,6 @@ async def async_setup_entry(
 
     # The sensors are defined in the const.py file
     sensors: list[NovafosWaterSensor] = []
-    use_grouped_sensors = config.options.get(
-        "use_grouped_sensors", config.data.get("use_grouped_sensors", False)
-    )
     # The coordinator data is already populated and this means it is possible to 'auto-discover' which sensors to create:
     # If the first refresh failed coordinator.data is None.  Fall back to the
     # meters discovered during authentication so the entities still get created
@@ -60,21 +58,20 @@ async def async_setup_entry(
 
     if "water" in meter_types:
         for description in WATER_SENSOR_TYPES:
-            sensors.append(NovafosWaterSensor(name, coordinator, description))
+            sensors.append(
+                NovafosWaterSensor(name, coordinator, description, config.data)
+            )
             # _LOGGER.debug("Adding Novafos sensor %s", description.name)
-        if use_grouped_sensors:
-            for description in EXTRA_WATER_SENSOR_TYPES:
-                sensors.append(NovafosWaterSensor(name, coordinator, description))
-                # _LOGGER.debug("Adding Novafos sensor %s", description.name)
 
     if "heating" in meter_types:
         for description in HEATING_SENSOR_TYPES:
-            sensors.append(NovafosWaterSensor(name, coordinator, description))
-        if use_grouped_sensors:
-            for description in EXTRA_HEATING_SENSOR_TYPES:
-                sensors.append(NovafosWaterSensor(name, coordinator, description))
+            sensors.append(
+                NovafosWaterSensor(name, coordinator, description, config.data)
+            )
         for description in COOLING_SENSOR_TYPES:
-            sensors.append(NovafosCoolingSensor(name, coordinator, description))
+            sensors.append(
+                NovafosCoolingSensor(name, coordinator, description, config.data)
+            )
 
     async_add_entities(sensors)
 
@@ -84,13 +81,18 @@ class NovafosCoolingSensor(CoordinatorEntity, SensorEntity):
 
     entity_description: NovafosSensorDescription
 
-    def __init__(self, name, coordinator, description):
+    def __init__(self, name, coordinator, description, entry_data=None):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_name = f"{name} {description.name}"
         self._attr_unique_id = (
             f"{name.lower()}-{description.sensor_type}-{description.key}"
         )
+        # Entries for one selected meter are scoped like NovafosWaterSensor.
+        if entry_data and "measurement_point_id" in entry_data:
+            meter_key = meter_statistics_key(entry_data, description.sensor_type)
+            self._attr_unique_id = f"{meter_key}-{description.key}"
+            self.entity_id = f"sensor.{DOMAIN}_{meter_key}_{description.key}"
 
     def _row(self) -> dict | None:
         summary = self.coordinator.cooling_summary or {}
@@ -120,7 +122,7 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
 
     entity_description: NovafosSensorDescription
 
-    def __init__(self, name, coordinator, description):
+    def __init__(self, name, coordinator, description, entry_data=None):
         """Initialise the coordinator"""
         super().__init__(coordinator)
 
@@ -134,6 +136,11 @@ class NovafosWaterSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = (
             f"{name.lower()}-{description.sensor_type}-{description.key}"
         )
+        if entry_data and "measurement_point_id" in entry_data:
+            meter_key = meter_statistics_key(entry_data, description.sensor_type)
+            key = description.key
+            self._attr_unique_id = f"{meter_key}-{key}"
+            self.entity_id = f"sensor.{DOMAIN}_{meter_key}_{key}"
 
         # Use the unit KMD reports for this meter; heating may be kWh, MWh,
         # GJ or m³.  The recorder statistics are imported with the same unit.

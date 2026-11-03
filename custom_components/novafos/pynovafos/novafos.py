@@ -33,12 +33,25 @@ class Novafos:
     # those zeros.  One day per request is the only reliable choice.
     DEFAULT_CHUNK_DAYS = 1
 
-    def __init__(self, timezone, request_timeout=None, chunk_days=None):
+    def __init__(
+        self,
+        timezone,
+        customer_id=None,
+        measurement_point_id=None,
+        request_timeout=None,
+        chunk_days=None,
+    ):
         self._api_url = "https://easy-energy-plugin-api.kmd.dk"
         self.tz = ZoneInfo(timezone)
         self._request_timeout = request_timeout or self.DEFAULT_TIMEOUT
         self._chunk_days = chunk_days or self.DEFAULT_CHUNK_DAYS
 
+        self._selected_customer_id = (
+            str(customer_id) if customer_id is not None else None
+        )
+        self._selected_measurement_point_id = (
+            str(measurement_point_id) if measurement_point_id is not None else None
+        )
         self._access_token = ""
         self._customer_id = ""
         self._customer_number = ""
@@ -46,7 +59,6 @@ class Novafos:
         self._earliest_data_date = None
         self._meter_data = {}
         self._meter_data_extra = {}
-        self._meter_data_grouped = {}
         self._last_valid_day = None
         # Raw availableTimeSeriesPeriods response; also lists units that
         # customerActiveMeters leaves out.  None until first fetched.
@@ -116,8 +128,12 @@ class Novafos:
                 )
                 return False
 
-    def _get_customer_id(self):
-        # Need to retrieve the customer ID from the user profile to fetch data.
+    def get_customers(self, access_token=None):
+        """Return the customers and addresses accessible to this login."""
+        if access_token is not None:
+            if len(access_token) < 1200:
+                raise LoginFailed("Invalid access token")
+            self._access_token = "Bearer " + access_token
         headers = {
             "Authorization": self._access_token,
         }
@@ -154,16 +170,43 @@ class Novafos:
         # Parse and validate JSON payload
         try:
             resp_json = response.json()
-            self._customer_id = f"{resp_json['Customers'][0]['Id']}"
-            self._customer_number = f"{resp_json['Customers'][0]['Number']}"
+            customers = resp_json["Customers"]
+            if not isinstance(customers, list):
+                raise ValueError("Customers must be a list")
         except Exception as json_err:
             _LOGGER.error("Failed to parse customer id response: %s", json_err)
             raise HTTPFailed from json_err
+        return customers
+
+    def _get_customer_id(self):
+        customers = self.get_customers()
+        self._customer_id = ""
+        self._customer_number = ""
+        try:
+            if self._selected_customer_id is None:
+                customer = customers[0]
+            else:
+                customer = next(
+                    customer
+                    for customer in customers
+                    if str(customer["Id"]) == self._selected_customer_id
+                )
+            self._customer_id = str(customer["Id"])
+            self._customer_number = str(customer["Number"])
+        except (IndexError, KeyError, StopIteration, TypeError) as error:
+            raise HTTPFailed("Selected customer is unavailable") from error
         _LOGGER.debug(
             "Retrieved customer_id, number: %s, %s",
             self._customer_id,
             self._customer_number,
         )
+
+    def get_meters(self, customer_id):
+        """Discover active water and heating meters for one customer."""
+        self._selected_customer_id = str(customer_id)
+        self._get_customer_id()
+        self._get_active_meters()
+        return self.get_meter_types()
 
     def _get_active_meters(self):
         """
@@ -208,16 +251,27 @@ class Novafos:
                 headers=headers,
                 timeout=self._request_timeout,
             )
+            if response.status_code in (401, 403):
+                raise LoginFailed("Invalid or expired access token")
             response.raise_for_status()
-        except requests.exceptions.RequestException as req_err:
-            _LOGGER.error("Failed to retrieve active meters: %s", req_err)
-            raise HTTPFailed from req_err
+            response_json = response.json()
+            if not isinstance(response_json, list):
+                raise ValueError("Meters must be a list")
+        except (requests.exceptions.RequestException, ValueError) as error:
+            raise HTTPFailed("Failed to retrieve active meters") from error
         # NOTE: Failure may happen right here whenever the API is updated with new headers and what not.
         # self._print_json(response.json(), "Get active meters response")
 
-        response_json = response.json()
         self._active_meters = []
+        self._meter_data = {}
+        self._meter_data_extra = {}
         for meter in response_json:
+            if (
+                self._selected_measurement_point_id is not None
+                and str(meter["MeasurementPointId"])
+                != self._selected_measurement_point_id
+            ):
+                continue
             """ Pick up active water measuring meters """
             if meter["IsActive"] and meter["ConsumptionTypeId"] == 6:
                 # Water type
@@ -245,6 +299,8 @@ class Novafos:
                 self._meter_data["heating"] = []
                 self._meter_data_extra["heating"] = []
                 self._active_meters.append(active)
+        if self._selected_measurement_point_id is not None and not self._active_meters:
+            raise HTTPFailed("Selected meter is unavailable")
         _LOGGER.debug("Got active (water/heating) meters : %s", self._active_meters)
 
     def get_meter_types(self):
@@ -292,9 +348,21 @@ class Novafos:
         )
 
         # Entry with RangeType 0 is for the specific meter, and is the one we care about.  It has the actual earliest date of data available.
-        periods = [p for p in result_json or [] if p.get("RangeType") == 0] or (
-            result_json or []
-        )
+        periods = result_json or []
+        if self._selected_measurement_point_id is not None:
+            # One config entry per meter: only that meter's periods, or the
+            # account wide range when KMD lists none for it.
+            periods = [
+                p
+                for p in periods
+                if str(p.get("MeasurementPointId"))
+                == self._selected_measurement_point_id
+            ] or [p for p in periods if p.get("RangeType") == 1]
+            if not periods:
+                raise HTTPFailed("Selected meter has no available periods")
+        # Entries with RangeType 0 are specific meters and carry the actual
+        # earliest date of data available.
+        periods = [p for p in periods if p.get("RangeType") == 0] or periods
         min_dates = [p["MinDate"] for p in periods if p.get("MinDate")]
         if not min_dates:
             _LOGGER.warning(
@@ -445,10 +513,10 @@ class Novafos:
             "type": metering_device["type"],
             "Data": series_data,
             "Extra": {
-                "Sum": result_json["Total"]["Value"],
-                "Avg": result_json["Average"]["Value"],
-                "Max": result_json["Maximum"]["Value"],
-                "Min": result_json["Minimum"]["Value"],
+                "Sum": (result_json.get("Total") or {}).get("Value"),
+                "Avg": (result_json.get("Average") or {}).get("Value"),
+                "Max": (result_json.get("Maximum") or {}).get("Value"),
+                "Min": (result_json.get("Minimum") or {}).get("Value"),
                 "LastValidDate": last_valid_date,
             },
         }
@@ -891,266 +959,5 @@ class Novafos:
                 )
         return meter_year_data
 
-    def group_by_day(self, meter_type):
-        """
-        Groups the input data into buckets of 24 hourly measurements per day.
-
-        Args:
-            meter_type: A string water, heating designating which data series to group
-            prev_day_data: A data structure ('2024-01-02', 0.67, 0.502, 0.168, 0.67, 0.419)
-                with the possible last statistic data
-
-        Returns:
-            A dictionary where keys are dates in the format "YYYY-MM-DD"
-            and values are lists of tuples representing hourly measurements
-            for that day.
-            The returned data is (date, sum, change, min, max, mean)
-            sum = sum of consumption for all 24 hours
-            change = change of sum since yesterday
-            min = min value of the hourly data
-            max = max value of the hourly data
-            mean = mean value of the hourly data
-        """
-        daily_data = {}
-        daily_stats = []
-        daily_sums = []
-
-        for item in self._meter_data[meter_type]:
-            # _LOGGER.debug(item)
-            date_str = item["DateFrom"]
-            measurement = item["Value"]
-            # date = self._local_str_to_utc(date_str)
-            date = datetime.fromisoformat(date_str)
-            date_key = date.strftime("%Y-%m-%d")  # Format date as "YYYY-MM-DD"
-            if date_key not in daily_data:
-                daily_data[date_key] = []
-            daily_data[date_key].append((date_str, measurement))
-
-        # _LOGGER.debug(sorted(daily_data.items()))
-
-        for date, hourly_data in sorted(daily_data.items()):
-            if len(hourly_data) == 24:  # Ensure 24 hourly measurements
-                daily_sum = round(sum(measurement for _, measurement in hourly_data), 3)
-                daily_sums.append((date, daily_sum))
-                # _LOGGER.debug(daily_sums[-1])
-
-        if not daily_sums:
-            return []
-
-        # Handle the first day
-        curr_date, curr_sum = daily_sums[0]
-        curr_sum = round(curr_sum, 3)
-        daily_stats.append(
-            (
-                curr_date,
-                curr_sum,  # sum
-                curr_sum,  # change
-                curr_sum,  # min
-                curr_sum,  # max
-                curr_sum,  # mean
-            )
-        )
-
-        if len(daily_sums) > 1:
-            for i in range(1, len(daily_sums)):  # Iterate from the second day onwards
-                prev_date, prev_sum = daily_sums[i - 1]
-                curr_date, curr_sum = daily_sums[i]
-                daily_stats.append(
-                    (
-                        curr_date,
-                        round(curr_sum, 3),
-                        round(
-                            curr_sum - prev_sum, 3
-                        ),  # Calculate change for the current day
-                        min(curr_sum, prev_sum),
-                        max(curr_sum, prev_sum),
-                        round((curr_sum + prev_sum) / 2, 3),
-                    )
-                )
-
-        # _LOGGER.debug(f"Daily stats: {daily_stats}")
-        return daily_stats
-
-        # Code to calculate max min mean for the underlying hourly dataset.
-        # This is what the webinterface does.  It does not however maintain the
-        # magnitude of the data, but that of the underlying dataset.
-        #
-        # for date, hourly_data in sorted(daily_data.items()):
-        #     if len(hourly_data) == 24:  # Ensure 24 hourly measurements
-        #         daily_sum = round(sum(measurement for _, measurement in hourly_data),3)
-        #         min_val = round(min(measurement for _, measurement in hourly_data), 3)
-        #         max_val = round(max(measurement for _, measurement in hourly_data), 3)
-        #         mean_val = round(daily_sum / 24, 3)
-        #         daily_sums.append((date, daily_sum, max_val, min_val, mean_val))
-        #         #_LOGGER.debug(daily_sums[-1])
-
-        # # Handle the first day
-        # curr_date, curr_sum, curr_max, curr_min, curr_mean = daily_sums[0]
-        # daily_stats.append((
-        #     curr_date,
-        #     curr_sum,
-        #     curr_sum, #change
-        #     curr_min,
-        #     curr_max,
-        #     curr_mean
-        # ))
-
-        # if len(daily_sums) > 1:
-        #     for i in range(1, len(daily_sums)):  # Iterate from the second day onwards
-        #         prev_date, prev_sum, prev_max, prev_min, prev_mean = daily_sums[i-1]
-        #         curr_date, curr_sum, curr_max, curr_min, curr_mean = daily_sums[i]
-        #         daily_stats.append((
-        #             curr_date,
-        #             curr_sum,
-        #             round(curr_sum - prev_sum,3),  # Calculate change for the current day
-        #             curr_min,
-        #             curr_max,
-        #             curr_mean
-        #         ))
-
-        # _LOGGER.debug(f"Daily stats: {daily_stats}")
-        # return daily_stats
-
-    def get_grouped_statistics(self, meter_type: str, grouping: str):
-        """
-        Groups daily statistics into specified time intervals (daily, weekly, monthly, yearly).
-
-        Args:
-            daily_stats: A list of tuples, where each tuple represents daily statistics:
-                        (date, daily_sum, daily_change, daily_min_sum, daily_max_sum, daily_mean_sum)
-            grouping: String specifying the grouping interval ('day', 'week', 'month', 'year')
-
-        Returns:
-            A list of tuples, where each tuple represents statistics for the given grouing:
-            (grouping_start_date, grouping_sum, grouping_change, grouping_min_sum, grouping_max_sum, grouping_mean_sum)
-        """
-        grouping_stats = []
-        grouping_sums = []
-
-        daily_stats = self.group_by_day(meter_type)
-        if not daily_stats:
-            return []
-
-        if grouping == "day":
-            return daily_stats
-
-        if grouping == "week":
-            # Determine the start date of the first week in the data
-            first_date = datetime.strptime(daily_stats[0][0], "%Y-%m-%d")
-            first_week_start = first_date - timedelta(
-                days=first_date.weekday()
-            )  # Shift to Monday
-            # _LOGGER.debug(f"First week: {first_date}, {first_week_start}, {first_date.weekday()}")
-
-            current_week_start = first_week_start
-            week_sum = 0
-
-            for date, daily_sum, _, _, _, _ in daily_stats:
-                date_obj = datetime.strptime(date, "%Y-%m-%d")
-                if date_obj >= current_week_start and date_obj < (
-                    current_week_start + timedelta(days=7)
-                ):
-                    week_sum += daily_sum
-                else:
-                    grouping_sums.append(
-                        (current_week_start.strftime("%Y-%m-%d"), round(week_sum, 3))
-                    )
-                    # Move to the next Monday
-                    current_week_start += timedelta(days=7)
-                    week_sum = daily_sum
-
-            # Add the last week's data
-            if week_sum > 0:
-                grouping_sums.append(
-                    (current_week_start.strftime("%Y-%m-%d"), round(week_sum, 3))
-                )
-        elif grouping == "month":
-            current_month = None
-            grouping_sum = 0
-            for date, daily_sum, _, _, _, _ in daily_stats:
-                date_obj = datetime.strptime(date, "%Y-%m-%d")
-                if current_month is None:
-                    print("New month", date_obj.month)
-                    current_month = date_obj.month
-                    grouping_sum = daily_sum
-                elif current_month != date_obj.month:
-                    print("New month", date_obj.month)
-                    grouping_sums.append(
-                        (
-                            (date_obj.replace(day=1) - timedelta(days=1)).strftime(
-                                "%Y-%m-%d"
-                            ),
-                            round(grouping_sum, 3),
-                        )
-                    )
-                    current_month = date_obj.month
-                    grouping_sum = daily_sum
-                else:
-                    grouping_sum += daily_sum
-
-            if grouping_sum > 0:  # Add the last month's data
-                grouping_sums.append(
-                    (
-                        date_obj.replace(day=1).strftime("%Y-%m-%d"),
-                        round(grouping_sum, 3),
-                    )
-                )
-
-        elif grouping == "year":
-            current_year = None
-            grouping_sum = 0
-            for date, daily_sum, _, _, _, _ in daily_stats:
-                date_obj = datetime.strptime(date, "%Y-%m-%d")
-                if current_year is None:
-                    print("New year", date_obj.year)
-                    current_year = date_obj.year
-                    grouping_sum = daily_sum
-                elif current_year != date_obj.year:
-                    print("New year", date_obj.year)
-                    grouping_sums.append(
-                        (f"{current_year}-01-01", round(grouping_sum, 3))
-                    )
-                    current_year = date_obj.year
-                    grouping_sum = daily_sum
-                else:
-                    grouping_sum += daily_sum
-
-            if grouping_sum > 0:  # Add the last year's data
-                print("Add year", grouping_sum, current_year)
-                grouping_sums.append((f"{current_year}-01-01", round(grouping_sum, 3)))
-
-        _LOGGER.debug(f"Grouping_sums: {grouping_sums}")
-
-        if grouping_sums:
-            first_grouping_date, first_grouping_sum = grouping_sums[0]
-            grouping_stats.append(
-                (
-                    first_grouping_date,
-                    round(first_grouping_sum, 3),
-                    0.0,  # No change for the first grouping
-                    round(first_grouping_sum, 3),
-                    round(first_grouping_sum, 3),
-                    round(first_grouping_sum, 3),
-                )
-            )
-
-        if len(grouping_sums) > 1:
-            for i in range(1, len(grouping_sums)):
-                prev_grouping_date, prev_grouping_sum = grouping_sums[i - 1]
-                curr_grouping_date, curr_grouping_sum = grouping_sums[i]
-                grouping_stats.append(
-                    (
-                        curr_grouping_date,
-                        round(curr_grouping_sum, 3),
-                        round(curr_grouping_sum - prev_grouping_sum, 3),
-                        min(curr_grouping_sum, prev_grouping_sum),
-                        max(curr_grouping_sum, prev_grouping_sum),
-                        round((curr_grouping_sum + prev_grouping_sum) / 2, 3),
-                    )
-                )
-
-        _LOGGER.debug(f"Grouped stats: {grouping_stats}")
-        return grouping_stats
-
-    def get_dummy_data(self):
-        return {"water": [{"DateFrom": None, "Value": None}]}
+    def get_dummy_data(self, meter_type="water"):
+        return {meter_type: [{"DateFrom": None, "Value": None}]}

@@ -67,14 +67,32 @@ To update, select **Update information** on the repository in HACS and download 
 Fully configurable through config flow.
   1. Head to configuration --> integration
   2. Add new and search for Novafos
-  3. Enter your name for the sensors, default is "Novafos", but if you have more, go ahead and change it.
-  4. External hourly consumption statistics are enabled by default. The separate grouped statistics sensor option is deprecated; enable it only if you still use those entities.
-  5. Enter a working access token to get started.  All history KMD has is then imported in the background,
-     which can take several minutes. You can enter some random text to create the sensors without the pre-load of data.
+  3. Enter your name for the sensors, default is "Novafos". Different instances can use the same name.
+  4. Leave external hourly consumption statistics enabled to use min/max/mean and consumption trends in Statistics Graph cards.
+  5. Enter a valid access token to retrieve your addresses.
+  6. Select an address. If the account has only one address, it is selected automatically.
+  7. Select a water or heating meter at that address. A single available meter is selected automatically.
 
-Both options can be changed later via Configure, where you can also paste a new access token (leave the field empty to keep
-the current one) and enter the water and heating price per unit for the current year. Each year keeps its own price, so a new
-price never reprices earlier years; history from before the first price uses the first price entered. Older installations keep their grouped sensor setting; external statistics are enabled by default independently of that setting. Disabling grouped sensors stops importing their grouped history, but does not delete existing recorder history. The main hourly `sensor.*` history remains available regardless of either option.
+Repeat **Add integration** for each meter you want to monitor. For two addresses with one water meter and one heating
+meter each, add four instances. Reuse the same access token for addresses linked to the same account.
+
+Use the sensor and statistic IDs assigned to your meter when configuring dashboards. For example:
+* Sensor entity: `sensor.novafos_12345678_44556677_water_statistics`
+* External statistic: `novafos:12345678_44556677_water_hourly_consumption`
+
+To update an access token for one instance, open its **Configure** dialog. To update all loaded instances, call
+`novafos.update_token`. If your instances use separate logins, supply `config_entry_id` to target the intended instance.
+
+After the meter is selected, all history KMD has is imported in the background, which can take several minutes.
+
+Use **Configure** to enable or disable external statistics, paste a new access token (leave the field empty to keep
+the current one) and enter the water and heating price per unit for the current year. Each year keeps its own price, so a
+new price never reprices earlier years; history from before the first price uses the first price entered. The main hourly
+`sensor.*` history is always recorded.
+
+Installations made before multiple addresses were supported keep one instance for all meters of the account's first
+address, with the original sensor and statistic IDs (`sensor.novafos_water_statistics`, `novafos:heating_consumption`,
+and so on). The grouped day/week/month/year sensors were removed in 5.4.4; delete their entities if they remain.
 
 ---
 # Notice on integration status and ways to login
@@ -177,9 +195,6 @@ The integration creates the following sensors for water/heating (here water used
   * The same hourly series as an external statistic. **Use this one in the Energy dashboard.**
 * `novafos:water_cost` (`novafos:heating_cost` for heating, only when a price is configured)
   * Cumulative cost in your Home Assistant currency. In the Energy dashboard select "Use an entity tracking the total costs".
-* sensor.novafos_water_statistics_{day|week|month|year} (optional, deprecated)
-  * Historical totals for each completed day, week, month or year. These are computed period totals.
-  * **Migrate away from these and use the external statistic instead.**
 * `novafos:water_hourly_consumption` (optional external statistic; `novafos:heating_hourly_consumption` for heating)
   * Hourly based statistics. Use `change` in the built-in Statistics graph to show consumption trends day-to-day, week-to-week, month-to-month or year-to-year.
   * This statistic has min/max/mean/change data calculated.
@@ -192,6 +207,11 @@ Water statistics use cubic meters (m³), heating statistics the unit KMD reports
 like `TOTAL` type sensors (statistics-only) to have `min`, `max` or `mean`. The `novafos:..._hourly_consumption` statistic stores
 arithmetic min/mean/max and change without changing the Energy dashboard's sensor history.
 The main sensor also exposes a `year_total` attribute when yearly data is available.
+
+Replace dashboard references to `sensor.novafos_water_statistics_{day|week|month|year}` with the main hourly sensor
+or external statistic for your meter. Select `change` and the desired day, week, month or year period to show consumption.
+Remove unused grouped sensor entities through **Settings > Devices & services > Entities**. Their recorded history
+is not deleted automatically.
 
 Under consideration is adding attributes for some sort of high/low warning so that an indication for high water use or never having zero flow could be flagged.  You can add a helper which flags if the `min` is ever rising above 0.0.
 
@@ -309,8 +329,6 @@ For the hourly data you can furthermore get graphs showing the sum, state and ch
   - Chart type: Line
 
 ![alt text](images/statistics-graph-sum-state-change.png)
-
-(Note: If you try out using the optional computed grouped sensors you need to use the `state` statistic)
 
 ## Max, min, mean graphs using Apexchart
 

@@ -12,6 +12,6 @@
   "issue_tracker": "https://github.com/kernest/homeassistant-novafos/issues",
   "requirements": [],
   "ssdp": [],
-  "version": "5.4.3",
+  "version": "5.4.4",
   "zeroconf": []
 }

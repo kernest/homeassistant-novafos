@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from homeassistant.components.sensor import SensorStateClass
 
 from custom_components.novafos.const import (
-    EXTRA_HEATING_SENSOR_TYPES,
     HEATING_SENSOR_TYPES,
     WATER_SENSOR_TYPES,
 )
@@ -46,7 +45,7 @@ def test_hourly_water_sensor_is_a_valid_interval_measurement():
 
 def test_heating_sensor_metadata_matches_home_assistant_rules():
     hourly = HEATING_SENSOR_TYPES[0]
-    statistics = HEATING_SENSOR_TYPES[1:] + EXTRA_HEATING_SENSOR_TYPES
+    statistics = HEATING_SENSOR_TYPES[1:]
 
     assert hourly.device_class is None
     assert hourly.state_class is SensorStateClass.MEASUREMENT

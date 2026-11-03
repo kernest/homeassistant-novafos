@@ -1,10 +1,26 @@
 {
   "config": {
     "step": {
+      "manual_token_flow": {
+        "data": {
+          "access_token": "Access token"
+        }
+      },
+      "address": {
+        "title": "Address",
+        "data": {
+          "customer_id": "Address"
+        }
+      },
+      "metering": {
+        "title": "Meter",
+        "data": {
+          "measurement_point_id": "Water or heating meter"
+        }
+      },
       "user": {
         "data": {
           "name": "[%key:common::config_flow::data::name%]",
-          "use_grouped_sensors": "Create grouped statistics sensors (deprecated)",
           "use_external_statistics": "Create external hourly consumption statistics for trend graphs"
         }
       }
@@ -12,6 +28,10 @@
     "error": {
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "no_addresses": "No addresses were found for this account.",
+      "no_meters": "No active water or heating meters were found at this address.",
+      "invalid_address": "Select one of the available addresses.",
+      "invalid_meter": "Select one of the available meters.",
       "unknown": "[%key:common::config_flow::error::unknown%]"
     },
     "abort": {
@@ -23,8 +43,9 @@
       "init": {
         "data": {
           "access_token": "Insert a working access token (leave blank to keep current token)",
-          "use_grouped_sensors": "Create grouped statistics sensors (deprecated)",
-          "use_external_statistics": "Create external hourly consumption statistics for trend graphs"
+          "use_external_statistics": "Create external hourly consumption statistics for trend graphs",
+          "water_price": "Water price per m³ from this year on (0 = clear this year's price)",
+          "heating_price": "Heating price per unit from this year on (0 = clear this year's price)"
         }
       }
     }

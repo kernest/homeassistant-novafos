@@ -240,6 +240,7 @@ def make_coordinator(monkeypatch, api, sums):
     coordinator = SimpleNamespace(
         hass=hass,
         api=api,
+        entry=SimpleNamespace(data={}),
         _details_reconciled=False,
         cooling_summary=None,
         _schedule_full_history=Mock(),

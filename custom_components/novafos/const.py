@@ -111,6 +111,18 @@ def prices_option(meter_type: str) -> str:
 # Default name for sensor prefix texts (possibly other things)
 DEFAULT_NAME = "Novafos"
 
+
+def meter_statistics_key(data, meter_type):
+    """Scope new entries to a customer and meter, preserving legacy IDs."""
+    if "customer_id" in data and "measurement_point_id" in data:
+        return f"{data['customer_id']}_{data['measurement_point_id']}_{meter_type}"
+    return meter_type
+
+
+# NOTE:
+#  All consumption data can be derived from the statistics sensor.
+#  The sensor will always have state "unknown" because data is only relevant in the past.
+#  Instead use the statistics charts and cards to get data out.
 WATER_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
     NovafosSensorDescription(
         sensor_type="water",
@@ -139,53 +151,6 @@ WATER_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
     ),
 )
 
-EXTRA_WATER_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
-    NovafosSensorDescription(
-        sensor_type="water",
-        key="statistics_day",
-        name="Water statistics day",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.WATER,
-        icon="mdi:water",
-        state_class=SensorStateClass.TOTAL,
-    ),
-    NovafosSensorDescription(
-        sensor_type="water",
-        key="statistics_week",
-        name="Water statistics week",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.WATER,
-        icon="mdi:water",
-        state_class=SensorStateClass.TOTAL,
-    ),
-    NovafosSensorDescription(
-        sensor_type="water",
-        key="statistics_month",
-        name="Water statistics month",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.WATER,
-        icon="mdi:water",
-        state_class=SensorStateClass.TOTAL,
-    ),
-    NovafosSensorDescription(
-        sensor_type="water",
-        key="statistic_years",
-        name="Water statistics year",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.WATER,
-        icon="mdi:water",
-        state_class=SensorStateClass.TOTAL,
-    ),
-)
-
 HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
     NovafosSensorDescription(
         sensor_type="heating",
@@ -203,53 +168,6 @@ HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
         sensor_type="heating",
         key="statistics",
         name="Heating statistics",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.ENERGY,
-        icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.TOTAL,
-    ),
-)
-
-EXTRA_HEATING_SENSOR_TYPES: Final[tuple[NovafosSensorDescription, ...]] = (
-    NovafosSensorDescription(
-        sensor_type="heating",
-        key="statistics_day",
-        name="Heating statistics day",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.ENERGY,
-        icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.TOTAL,
-    ),
-    NovafosSensorDescription(
-        sensor_type="heating",
-        key="statistics_week",
-        name="Heating statistics week",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.ENERGY,
-        icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.TOTAL,
-    ),
-    NovafosSensorDescription(
-        sensor_type="heating",
-        key="statistics_month",
-        name="Heating statistics month",
-        entity_registry_enabled_default=True,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        suggested_display_precision=3,
-        device_class=SensorDeviceClass.ENERGY,
-        icon="mdi:lightning-bolt-circle",
-        state_class=SensorStateClass.TOTAL,
-    ),
-    NovafosSensorDescription(
-        sensor_type="heating",
-        key="statistic_years",
-        name="Heating statistics year",
         entity_registry_enabled_default=True,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=3,

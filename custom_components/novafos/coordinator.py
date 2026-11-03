@@ -24,11 +24,11 @@ from .const import (
     RECONCILIATION_TOLERANCE_REL,
     STATISTICS_LOOKBACK_DAYS,
     detail_unit,
+    meter_statistics_key,
     meter_unit,
     price_option,
     prices_option,
 )
-from .legacy_statistics import async_import_grouped_statistics
 from .pynovafos.novafos import HTTPFailed
 from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN, get_instance
 from homeassistant.components.recorder.models import (
@@ -71,9 +71,6 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         self.api = api
         self.hass = hass
         self.entry = entry
-        self.use_grouped_sensors = entry.options.get(
-            "use_grouped_sensors", entry.data.get("use_grouped_sensors", False)
-        )
         # Attribute data for the sensors
         self.attrib_data = {"year_total": None}
         # Latest cumulative sums imported into recorder.  The corresponding
@@ -127,6 +124,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         #     self.api._meter_data_extra = get_year_sample_data_extra()
 
         meter_year_data = None
+        hourly_statistics = None
         if await self.hass.async_add_executor_job(
             self.api.authenticate_using_access_token,
             self.access_token,
@@ -141,12 +139,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 )
                 # last_state = await self._insert_statistics(debug=debug)
                 async with self._import_lock:
-                    await self._insert_statistics(meter_year_data, debug=debug)
-                    if self.entry.options.get(
-                        "use_grouped_sensors",
-                        self.entry.data.get("use_grouped_sensors", False),
-                    ):
-                        await async_import_grouped_statistics(self.hass, self.api)
+                    hourly_statistics = await self._insert_statistics(
+                        meter_year_data, debug=debug
+                    )
                     data = (self.api._meter_data, meter_year_data)  # , last_state)
             except Exception as ex:
                 _LOGGER.exception("Error while updating Novafos data")
@@ -164,7 +159,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             "use_external_statistics",
             self.entry.data.get("use_external_statistics", True),
         ):
-            await self._insert_external_hourly_statistics()
+            await self._insert_external_hourly_statistics(hourly_statistics)
 
         # The data is stored in the coordinator as a .data field.
         _LOGGER.debug("Returning from Coordinator with data: %s", data)
@@ -187,11 +182,6 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 await self._insert_statistics(
                     meter_year_data, debug=False, full_history=True
                 )
-                if self.entry.options.get(
-                    "use_grouped_sensors",
-                    self.entry.data.get("use_grouped_sensors", False),
-                ):
-                    await async_import_grouped_statistics(self.hass, self.api)
                 data = (self.api._meter_data, meter_year_data)
             self.async_set_updated_data(data)
             if self._cooling_filter_pending:
@@ -210,7 +200,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
 
     async def _insert_statistics(
         self, meter_year_data, debug, full_history=False
-    ) -> None:
+    ) -> dict[str, list[StatisticData]]:
         """Update statistics when data is returned.
 
         A regular refresh imports the rolling window and, when a full import
@@ -225,7 +215,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         last_statistics = {}
         for meter_device in meter_devices:
             meter_type = meter_device["type"]
-            statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics"
+            statistic_id = f"sensor.{DOMAIN}_{meter_statistics_key(self.entry.data, meter_type)}_statistics"
             last_statistics[meter_type] = await get_instance(
                 self.hass
             ).async_add_executor_job(
@@ -247,7 +237,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     get_last_statistics,
                     self.hass,
                     1,
-                    f"{DOMAIN}:{meter_type}_consumption",
+                    f"{DOMAIN}:{meter_statistics_key(self.entry.data, meter_type)}_consumption",
                     True,
                     set(),
                 )
@@ -289,6 +279,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         )
         mismatched_meters = []
         coverage = {}
+        hourly_statistics = {}
 
         # Iterate over water/heating
         # _get_meter_types returns:
@@ -300,7 +291,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             # imported window.  Otherwise it is read from recorder below.
             sum_before_year = None
 
-            statistic_id = f"sensor.{DOMAIN}_{meter_type}_statistics"
+            statistic_id = f"sensor.{DOMAIN}_{meter_statistics_key(self.entry.data, meter_type)}_statistics"
             unit, unit_class, _ = meter_unit(meter_device)
 
             _LOGGER.debug("Last statistics (raw): %s", last_statistics[meter_type])
@@ -402,6 +393,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 unit_of_measurement=unit,
             )
             async_import_statistics(self.hass, metadata, statistics)
+            # Handed to the hourly external statistic directly: reading it
+            # back from recorder raced with this queued import.
+            hourly_statistics[meter_type] = statistics
             # The same series as an external statistic for the Energy
             # dashboard.  Recorder never compiles external statistics, so
             # nothing but this import writes to it.  The sensor.* statistic
@@ -413,7 +407,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     has_sum=True,
                     name=f"Novafos {meter_type} consumption",
                     source=DOMAIN,
-                    statistic_id=f"{DOMAIN}:{meter_type}_consumption",
+                    statistic_id=f"{DOMAIN}:{meter_statistics_key(self.entry.data, meter_type)}_consumption",
                     unit_class=unit_class,
                     unit_of_measurement=unit,
                 ),
@@ -497,6 +491,8 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             entry_data.pop(HISTORY_RECONCILIATION_KEY, None)
             self.hass.config_entries.async_update_entry(self.entry, data=entry_data)
 
+        return hourly_statistics
+
     def _prices(self, meter_type) -> dict[int, float]:
         """Return the configured price per year for a meter type."""
         raw = self.entry.options.get(prices_option(meter_type))
@@ -538,7 +534,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         prices = self._prices(meter_type)
         if not prices or not statistics:
             return
-        statistic_id = f"{DOMAIN}:{meter_type}_cost"
+        statistic_id = (
+            f"{DOMAIN}:{meter_statistics_key(self.entry.data, meter_type)}_cost"
+        )
         if full_history:
             cost = 0.0
         else:
@@ -621,7 +619,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 get_last_statistics,
                 self.hass,
                 1,
-                f"{DOMAIN}:heating_return_temperature",
+                f"{DOMAIN}:{meter_statistics_key(self.entry.data, 'heating')}_return_temperature",
                 True,
                 {"mean"},
             )
@@ -663,7 +661,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     has_sum=False,
                     name=f"Novafos heating {label}",
                     source=DOMAIN,
-                    statistic_id=f"{DOMAIN}:heating_{key}",
+                    statistic_id=f"{DOMAIN}:{meter_statistics_key(self.entry.data, 'heating')}_{key}",
                     unit_class="temperature",
                     unit_of_measurement="°C",
                 ),
@@ -694,7 +692,10 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
             "low flow filter"
         )
         get_instance(self.hass).async_clear_statistics(
-            [f"{DOMAIN}:heating_{key}" for key in COOLING_STATISTICS]
+            [
+                f"{DOMAIN}:{meter_statistics_key(self.entry.data, 'heating')}_{key}"
+                for key in COOLING_STATISTICS
+            ]
         )
         self._cooling_filter_pending = True
         return True
@@ -704,7 +705,9 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Import one extra unit as a cumulative statistic."""
         key, unit_of_measurement, unit_class = detail_unit(unit)
-        statistic_id = f"{DOMAIN}:{meter_type}_{key}"
+        statistic_id = (
+            f"{DOMAIN}:{meter_statistics_key(self.entry.data, meter_type)}_{key}"
+        )
         if full_history:
             _sum = 0.0
         else:
@@ -821,14 +824,17 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         rows = stat.get(statistic_id, [])
         return cast(float, rows[-1]["sum"]) if rows else None
 
-    async def _insert_external_hourly_statistics(self) -> None:
-        """Backfill and refresh arithmetic statistics from recorded hourly data."""
+    async def _insert_external_hourly_statistics(
+        self, hourly_statistics: dict[str, list[StatisticData]] | None = None
+    ) -> None:
+        """Import fetched hourly data and backfill older recorded statistics."""
         recorder = get_instance(self.hass)
         for meter_device in self.api.get_meter_types():
             meter_type = meter_device["type"]
-            statistic_id = f"{DOMAIN}:{meter_type}_hourly_consumption"
-            hourly_id = f"sensor.{DOMAIN}_{meter_type}_statistics"
+            statistic_id = f"{DOMAIN}:{meter_statistics_key(self.entry.data, meter_type)}_hourly_consumption"
+            hourly_id = f"sensor.{DOMAIN}_{meter_statistics_key(self.entry.data, meter_type)}_statistics"
             unit, unit_class, _ = meter_unit(meter_device)
+            fetched = (hourly_statistics or {}).get(meter_type, [])
             last_stats = await recorder.async_add_executor_job(
                 get_last_statistics, self.hass, 1, statistic_id, True, {"sum"}
             )
@@ -843,7 +849,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 statistics_during_period,
                 self.hass,
                 start,
-                None,
+                min(row["start"] for row in fetched) if fetched else None,
                 {hourly_id},
                 "hour",
                 None,
@@ -866,11 +872,31 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     )
                 )
 
+            for row in fetched:
+                value = row.get("state")
+                running_sum = row.get("sum")
+                if value is None or running_sum is None:
+                    continue
+                statistics.append(
+                    StatisticData(
+                        start=dt_util.as_utc(row["start"]),
+                        min=value,
+                        max=value,
+                        mean=value,
+                        sum=running_sum,
+                    )
+                )
+
             if statistics:
+                address = self.entry.data.get("address")
                 metadata = StatisticMetaData(
                     mean_type=StatisticMeanType.ARITHMETIC,
                     has_sum=True,
-                    name=f"Novafos {meter_type} hourly consumption",
+                    name=(
+                        f"Novafos {address} {meter_type} hourly consumption"
+                        if address
+                        else f"Novafos {meter_type} hourly consumption"
+                    ),
                     source=DOMAIN,
                     statistic_id=statistic_id,
                     unit_class=unit_class,

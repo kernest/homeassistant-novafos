@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
 
 import pytest
-
 from homeassistant.components.recorder import statistics as recorder_statistics
 from homeassistant.components.recorder.models import (
     StatisticData,
@@ -15,6 +14,7 @@ from homeassistant.components.recorder.models import (
     StatisticMetaData,
 )
 from homeassistant.components.recorder.statistics import valid_statistic_id
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.novafos import coordinator as coordinator_module
 from custom_components.novafos import update_listener
@@ -23,48 +23,199 @@ from custom_components.novafos.const import DOMAIN
 from custom_components.novafos.coordinator import (
     NovafosUpdateCoordinator,
 )
+from custom_components.novafos.services import async_setup_services
+from custom_components.novafos.sensor import async_setup_entry as async_setup_sensors
 
 
 @pytest.mark.asyncio
+async def test_saved_grouped_setting_creates_only_hourly_sensors():
+    coordinator = Mock()
+    coordinator.data = ({"water": [], "heating": []}, None)
+    coordinator.api.get_meter_types.return_value = []
+    entry = SimpleNamespace(
+        entry_id="entry-id",
+        data={"name": "Novafos", "use_grouped_sensors": True},
+        options={"use_grouped_sensors": True},
+    )
+    hass = SimpleNamespace(
+        data={DOMAIN: {entry.entry_id: {"coordinator": coordinator}}}
+    )
+    add_entities = Mock()
+    await async_setup_sensors(hass, entry, add_entities)
+    entities = add_entities.call_args.args[0]
+    keys = {entity.entity_description.key for entity in entities}
+    # This fork keeps the hourly sensors and adds cooling sensors; the
+    # grouped day/week/month/year sensors are gone.
+    assert {"hourly", "statistics"} <= keys
+    assert not keys & {
+        "statistics_day",
+        "statistics_week",
+        "statistics_month",
+        "statistic_years",
+        "statistics_year",
+    }
+    assert {
+        "novafos-water-statistics",
+        "novafos-heating-statistics",
+    } <= {entity.unique_id for entity in entities}
+
+
+@pytest.mark.asyncio
+async def test_four_instances_have_independent_statistics_and_sensors(monkeypatch):
+    async def execute(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "get_instance",
+        Mock(return_value=SimpleNamespace(async_add_executor_job=execute)),
+    )
+    monkeypatch.setattr(
+        coordinator_module, "get_last_statistics", Mock(return_value={})
+    )
+    history = Mock(return_value={})
+    monkeypatch.setattr(coordinator_module, "statistics_during_period", history)
+    internal = Mock()
+    external = Mock()
+    monkeypatch.setattr(coordinator_module, "async_import_statistics", internal)
+    monkeypatch.setattr(coordinator_module, "async_add_external_statistics", external)
+    entity_ids = set()
+    unique_ids = set()
+    for customer_id in ("11", "22"):
+        for meter_type, point_id in (("water", "101"), ("heating", "102")):
+            entry = SimpleNamespace(
+                entry_id=f"{customer_id}_{point_id}",
+                options={},
+                data={
+                    "name": "Novafos",
+                    "customer_id": customer_id,
+                    "measurement_point_id": point_id,
+                    "meter_type": meter_type,
+                },
+            )
+            api = Mock()
+            api.get_meter_types.return_value = [{"type": meter_type}]
+            api.get_available_time_series_periods.return_value = datetime(2026, 1, 1)
+            api.get_statistics.return_value = {
+                meter_type: [{"DateFrom": "2026-10-01T00:00:00", "Value": 1.0}]
+            }
+            hass = SimpleNamespace(
+                config=SimpleNamespace(time_zone="Europe/Copenhagen"),
+                async_add_executor_job=execute,
+            )
+            coordinator = SimpleNamespace(
+                hass=hass,
+                api=api,
+                entry=entry,
+                cumulative_totals={},
+                _auto_reconciled=True,
+                _sum_before=AsyncMock(return_value=0.0),
+                _import_cost_statistics=AsyncMock(),
+                _import_meter_details=AsyncMock(),
+                _schedule_full_history=Mock(),
+                _kmd_year_total=NovafosUpdateCoordinator._kmd_year_total,
+            )
+            fetched = await NovafosUpdateCoordinator._insert_statistics(
+                coordinator, None, False
+            )
+            await NovafosUpdateCoordinator._insert_external_hourly_statistics(
+                coordinator, fetched
+            )
+            entity_coordinator = Mock()
+            entity_coordinator.data = ({meter_type: []}, None)
+            entity_coordinator.api.get_meter_types.return_value = []
+            hass.data = {DOMAIN: {entry.entry_id: {"coordinator": entity_coordinator}}}
+            add_entities = Mock()
+            await async_setup_sensors(hass, entry, add_entities)
+            entity = next(
+                entity
+                for entity in add_entities.call_args.args[0]
+                if entity.entity_description.key == "statistics"
+            )
+            expected = (
+                f"sensor.novafos_{customer_id}_{point_id}_{meter_type}_statistics"
+            )
+            assert entity.entity_id == expected
+            entity_ids.add(entity.entity_id)
+            unique_ids.add(entity.unique_id)
+            assert internal.call_args.args[1]["statistic_id"] == expected
+            assert external.call_args.args[1]["statistic_id"] == (
+                f"novafos:{customer_id}_{point_id}_{meter_type}_hourly_consumption"
+            )
+            assert history.call_args.args[3] == {expected}
+    assert len(entity_ids) == len(unique_ids) == 4
+    # Each instance writes its consumption and hourly external statistics.
+    external_ids = {call.args[1]["statistic_id"] for call in external.call_args_list}
+    assert len(external_ids) == external.call_count == 8
+    assert "novafos:22_102_heating_consumption" in external_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [None, "entry-1"])
+async def test_token_service_refreshes_all_or_selected_entry(target):
+    coordinators = {
+        f"entry-{index}": SimpleNamespace(async_refresh=AsyncMock())
+        for index in range(4)
+    }
+    services = Mock()
+    services.has_service.return_value = False
+    hass = SimpleNamespace(
+        services=services,
+        data={
+            DOMAIN: {key: {"coordinator": value} for key, value in coordinators.items()}
+        },
+    )
+    await async_setup_services(hass, coordinators["entry-0"])
+    handler = services.async_register.call_args.args[2]
+    data = {"access_token": "new-token", "access_token_date_updated": ""}
+    if target is not None:
+        data["config_entry_id"] = target
+    await handler(SimpleNamespace(data=data))
+    for entry_id, coordinator in coordinators.items():
+        if target is None or entry_id == target:
+            assert coordinator.access_token == "new-token"
+            assert coordinator.access_token_date_updated
+            coordinator.async_refresh.assert_awaited_once()
+        else:
+            coordinator.async_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authenticated", [True, False])
 @pytest.mark.parametrize(
-    ("data", "options", "legacy", "external"),
+    ("data", "options", "external"),
     [
-        ({"use_grouped_sensors": True}, {}, True, True),
+        ({"use_grouped_sensors": True}, {}, True),
         (
             {"use_grouped_sensors": True},
             {"use_external_statistics": False},
-            True,
             False,
         ),
         (
             {"use_grouped_sensors": False},
             {"use_external_statistics": True},
-            False,
             True,
         ),
-        ({"use_grouped_sensors": True}, {"use_grouped_sensors": False}, False, True),
+        ({"use_grouped_sensors": True}, {"use_grouped_sensors": False}, True),
         (
             {"use_grouped_sensors": False, "use_external_statistics": False},
             {},
             False,
-            False,
         ),
     ],
 )
-async def test_statistics_options_are_independent(
-    data, options, legacy, external, monkeypatch
+async def test_statistics_options_ignore_removed_grouped_setting(
+    data, options, external, authenticated, monkeypatch
 ):
     async def run_executor(function, *args):
         return function(*args)
 
+    recorder = SimpleNamespace(async_block_till_done=AsyncMock())
+    monkeypatch.setattr(coordinator_module, "get_instance", Mock(return_value=recorder))
     api = Mock()
-    api.authenticate_using_access_token.return_value = True
+    api.authenticate_using_access_token.return_value = authenticated
     api.get_year_data.return_value = {}
     api._meter_data = {}
-    import_grouped = AsyncMock()
-    monkeypatch.setattr(
-        coordinator_module, "async_import_grouped_statistics", import_grouped
-    )
     coordinator = SimpleNamespace(
         hass=SimpleNamespace(async_add_executor_job=run_executor),
         api=api,
@@ -72,15 +223,26 @@ async def test_statistics_options_are_independent(
         access_token="",
         access_token_date_updated="",
         _import_lock=asyncio.Lock(),
-        _insert_statistics=AsyncMock(),
+        _insert_statistics=AsyncMock(return_value={"heating": []}),
         _insert_external_hourly_statistics=AsyncMock(),
     )
 
-    await NovafosUpdateCoordinator._async_update_data(coordinator)
+    if authenticated:
+        await NovafosUpdateCoordinator._async_update_data(coordinator)
+    else:
+        # An invalid token fails the refresh before any import.
+        with pytest.raises(UpdateFailed):
+            await NovafosUpdateCoordinator._async_update_data(coordinator)
 
-    coordinator._insert_statistics.assert_awaited_once()
-    assert import_grouped.await_count == int(legacy)
+    assert coordinator._insert_statistics.await_count == int(authenticated)
+    api.get_grouped_statistics.assert_not_called()
+    external = external and authenticated
     assert coordinator._insert_external_hourly_statistics.await_count == int(external)
+    recorder.async_block_till_done.assert_not_awaited()
+    if external:
+        coordinator._insert_external_hourly_statistics.assert_awaited_once_with(
+            {"heating": []} if authenticated else None
+        )
 
 
 @pytest.mark.asyncio
@@ -98,20 +260,18 @@ async def test_configure_preserves_token_when_changing_statistics_options():
 
     form = await flow.async_step_init()
     defaults = form["data_schema"]({})
-    assert defaults["use_grouped_sensors"] is True
+    assert "use_grouped_sensors" not in defaults
     assert defaults["use_external_statistics"] is True
 
-    result = await flow.async_step_init(
-        {**defaults, "use_grouped_sensors": False, "use_external_statistics": True}
-    )
+    result = await flow.async_step_init({**defaults, "use_external_statistics": True})
     assert result["data"]["access_token"] == "saved-token"
     assert result["data"]["access_token_date_updated"] == "2026-09-01T00:00:00"
+    assert "use_grouped_sensors" not in result["data"]
 
 
 @pytest.mark.asyncio
-async def test_legacy_option_reloads_entities_external_option_refreshes():
+async def test_removed_grouped_option_does_not_reload_entities():
     coordinator = SimpleNamespace(
-        use_grouped_sensors=True,
         async_request_refresh=AsyncMock(),
     )
     hass = SimpleNamespace(
@@ -129,7 +289,8 @@ async def test_legacy_option_reloads_entities_external_option_refreshes():
 
     entry.options["use_grouped_sensors"] = False
     await update_listener(hass, entry)
-    hass.config_entries.async_reload.assert_awaited_once_with("entry-id")
+    assert coordinator.async_request_refresh.await_count == 2
+    hass.config_entries.async_reload.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -170,7 +331,7 @@ async def test_external_hourly_statistics_backfill_handles_dst(
     api = Mock()
     api.get_meter_types.return_value = [{"type": "water"}, {"type": "heating"}]
     api.get_meter_types.return_value = [{"type": "water"}, {"type": "heating"}]
-    coordinator = SimpleNamespace(hass=hass, api=api)
+    coordinator = SimpleNamespace(hass=hass, api=api, entry=SimpleNamespace(data={}))
     monkeypatch.setattr(
         coordinator_module,
         "get_instance",
@@ -227,8 +388,9 @@ async def test_external_hourly_statistics_backfill_handles_dst(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authenticated", [True, False])
 async def test_external_hourly_statistics_recorder_roundtrip(
-    async_setup_recorder_instance, hass
+    async_setup_recorder_instance, hass, authenticated
 ):
     recorder = await async_setup_recorder_instance(hass)
     start = datetime(2026, 9, 21, tzinfo=ZoneInfo(hass.config.time_zone)).astimezone(
@@ -254,28 +416,66 @@ async def test_external_hourly_statistics_recorder_roundtrip(
                 state=1.0 if hour < 24 else 2.0,
                 sum=hour + 1 if hour < 24 else 24 + (hour - 23) * 2,
             )
-            for hour in range(48)
+            for hour in range(24 if authenticated else 48)
         ],
     )
     await hass.async_add_executor_job(recorder.block_till_done)
 
     api = Mock()
     api.get_meter_types.return_value = [{"type": "water"}, {"type": "heating"}]
-    api.authenticate_using_access_token.return_value = False
+    api.authenticate_using_access_token.return_value = authenticated
     api.get_dummy_data.return_value = {}
+    api.get_year_data.return_value = {}
+    api._meter_data = {}
+    fetched = {
+        "water": [
+            StatisticData(
+                start=start + timedelta(hours=hour),
+                state=2.0,
+                sum=24 + (hour - 23) * 2,
+            )
+            for hour in range(24, 48)
+        ]
+    }
     coordinator = SimpleNamespace(
         hass=hass,
         api=api,
-        entry=SimpleNamespace(data={"use_grouped_sensors": True}, options={}),
+        entry=SimpleNamespace(data={"use_grouped_sensors": False}, options={}),
         access_token="",
         access_token_date_updated="",
+        _import_lock=asyncio.Lock(),
+        _insert_statistics=AsyncMock(return_value=fetched),
     )
 
-    # An invalid token fails the refresh in this fork, so the external
-    # statistics are built directly from the recorded hourly data.
-    await NovafosUpdateCoordinator._insert_external_hourly_statistics(coordinator)
+    async def insert_external(hourly_statistics=None):
+        await NovafosUpdateCoordinator._insert_external_hourly_statistics(
+            coordinator, hourly_statistics
+        )
+
+    coordinator._insert_external_hourly_statistics = insert_external
+    if authenticated:
+        await NovafosUpdateCoordinator._async_update_data(coordinator)
+    else:
+        # An invalid token fails the refresh in this fork, so the external
+        # statistics are built from the recorded hourly data alone.
+        with pytest.raises(UpdateFailed):
+            await NovafosUpdateCoordinator._async_update_data(coordinator)
+        await insert_external()
     await hass.async_add_executor_job(recorder.block_till_done)
+    assert coordinator._insert_statistics.await_count == int(authenticated)
     api.get_statistics.assert_not_called()
+
+    internal = await recorder.async_add_executor_job(
+        recorder_statistics.statistics_during_period,
+        hass,
+        start,
+        None,
+        {hourly_id},
+        "hour",
+        None,
+        {"state", "sum"},
+    )
+    assert len(internal[hourly_id]) == (24 if authenticated else 48)
 
     result = await hass.async_add_executor_job(
         recorder_statistics.statistics_during_period,
@@ -403,6 +603,7 @@ async def test_external_consumption_trends_across_calendar_boundaries(
         api=Mock(
             get_meter_types=Mock(return_value=[{"type": "water"}, {"type": "heating"}])
         ),
+        entry=SimpleNamespace(data={}),
     )
     await NovafosUpdateCoordinator._insert_external_hourly_statistics(coordinator)
     await hass.async_add_executor_job(recorder.block_till_done)
