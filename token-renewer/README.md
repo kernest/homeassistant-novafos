@@ -14,11 +14,17 @@ Chromium profile:
    While KMD's login session is valid, KMD answers without showing the login
    form. The new token goes to Home Assistant's `novafos.update_token` action,
    which triggers a data refresh.
-3. **When KMD's session expires:** the login form would be needed again. The
-   service creates a Home Assistant notification with the noVNC link and
-   waits for you to log in.
+3. **When KMD's session expires:** the service selects email login and submits
+   if Chromium has autofilled both saved fields. If KMD explicitly asks to try
+   again, it retries once. After login it opens **Forbrug** when the portal
+   lands on **Mine oplysninger**, so the API token is actually issued.
+   If credentials are missing,
+   login fails, or a CAPTCHA needs attention, it creates a Home Assistant
+   notification with the noVNC link and waits for you.
 
-It never enters your credentials or solves a reCAPTCHA. How long a KMD login
+It never reads credentials out of the browser profile, supplies credentials, or
+interacts with reCAPTCHA. Save your login in Chromium through noVNC first if
+you want automatic email login. How long a KMD login
 session lasts, and so how often you need to log in again, can only be found by
 running it.
 
@@ -55,6 +61,7 @@ running it.
 | `VNC_PASSWORD` | required | Password for the noVNC page |
 | `NOVNC_URL` | | Link shown in the Home Assistant notification |
 | `RENEW_INTERVAL_MINUTES` | `180` | Time between renewals. Each token triggers a 31-day refresh of about 60 KMD requests, so more often than hourly is rarely useful |
+| `AUTO_LOGIN_SAVED_CREDENTIALS` | `true` | Submit browser-autofilled email login, with one explicit KMD-requested retry; set `false` for manual login only |
 | `RENEW_AT` | | Fixed daily renewal time in local time, for example `06:00`. Overrides `RENEW_INTERVAL_MINUTES`. A KMD session that expires within a day then needs a new login each day |
 | `TZ` | | Must match Home Assistant's time zone; the integration checks the token timestamp against its local clock |
 

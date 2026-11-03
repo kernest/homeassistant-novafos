@@ -9,8 +9,9 @@ identity server answers without showing the login form, and the new token is
 sent to Home Assistant's novafos.update_token action.
 
 When the session has expired the login form is shown instead.  The service
-then leaves the portal open in noVNC, notifies Home Assistant, and waits for
-the next human login.  It never enters credentials itself.
+tries the saved browser credentials once. If they are absent, login fails,
+or a CAPTCHA is shown, it leaves the portal open and asks for a human login.
+It never supplies credentials or interacts with CAPTCHA controls.
 """
 
 from __future__ import annotations
@@ -21,12 +22,14 @@ import hashlib
 import json
 import logging
 import os
+import re
+from contextlib import suppress
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
-from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import BrowserContext, Page, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
 IDENTITY = os.environ.get("KMD_IDENTITY_URL", "https://easy-energy-identity.kmd.dk")
@@ -49,6 +52,7 @@ PER_REQUEST = {"state", "nonce", "code_challenge", "code_challenge_method"}
 # KMD's login session is a session cookie, which Chromium drops when it
 # restarts.  It is saved here after each login or renewal and restored at start.
 COOKIES_FILE = DATA_DIR / "cookies.json"
+AUTO_LOGIN = os.environ.get("AUTO_LOGIN_SAVED_CREDENTIALS", "true").lower() == "true"
 HA_TIMEOUT = int(os.environ.get("HA_TIMEOUT_SECONDS", "600")) * 1000
 
 NOTIFICATION_ID = "novafos_token_renewer"
@@ -172,6 +176,99 @@ class Renewer:
         return None
 
 
+async def try_saved_login(page: Page) -> bool:
+    """Submit browser-autofilled credentials once, only on our identity server.
+
+    Read only presence flags, never extract or log the stored credentials.
+    A challenge or failed submission is left to the owner in noVNC.
+    """
+    if not AUTO_LOGIN:
+        return False
+    try:
+        await page.wait_for_url(f"{IDENTITY}/Identity/Account/Sign/Login*", timeout=15000)
+        if urlsplit(page.url).netloc != urlsplit(IDENTITY).netloc:
+            return False
+        email_login = page.get_by_role("button", name="Log på med e-mail", exact=True)
+        # The first button reveals the form; the second submits that same form.
+        password = page.locator('input[type="password"]')
+        if not await password.is_visible():
+            await email_login.click(timeout=5000)
+        await password.wait_for(state="visible", timeout=5000)
+        email = page.locator('#Input_Email')
+        for _ in range(30):
+            if urlsplit(page.url).netloc != urlsplit(IDENTITY).netloc:
+                return False
+            if await page.locator('iframe[title*="challenge" i]').is_visible():
+                _LOGGER.info("Login challenge requires the owner")
+                return False
+            populated = await email.evaluate("el => Boolean(el.value)") and await password.evaluate("el => Boolean(el.value)")
+            if populated:
+                await email_login.click(timeout=5000)
+                _LOGGER.info("Submitted login using browser-saved credentials")
+                # KMD can explicitly ask for another ordinary login submission.
+                # Retry only that response, once; never operate CAPTCHA controls.
+                try:
+                    await page.wait_for_function(
+                        """identity => location.origin !== identity ||
+                        document.body.innerText.includes('Vi er ikke sikre på om du er et menneske')""",
+                        arg=IDENTITY,
+                        timeout=10000,
+                    )
+                    retry = page.get_by_text(
+                        re.compile("Vi er ikke sikre på om du er et menneske")
+                    )
+                    if (
+                        urlsplit(page.url).netloc == urlsplit(IDENTITY).netloc
+                        and await retry.is_visible()
+                        and not await page.locator('iframe[title*="challenge" i]').is_visible()
+                        and await email.evaluate("el => Boolean(el.value)")
+                        and await password.evaluate("el => Boolean(el.value)")
+                    ):
+                        await email_login.click(timeout=5000)
+                        _LOGGER.info("Retried email login once after KMD requested another attempt")
+                except PlaywrightError:
+                    pass
+                return True
+            await asyncio.sleep(0.5)
+        _LOGGER.info("Saved credentials were not autofilled; waiting for the owner")
+    except PlaywrightError:
+        _LOGGER.info("Automatic login unavailable; waiting for the owner")
+    return False
+
+
+async def open_consumption_when_ready(page: Page) -> None:
+    """After login KMD may land on the profile, which does not issue API tokens.
+
+    Open the ordinary Forbrug menu once. Keep watching while the owner handles
+    a manual login too; otherwise an apparently successful login stays idle.
+    """
+    while True:
+        parsed = urlsplit(page.url)
+        if (
+            (parsed.scheme, parsed.netloc)
+            == (urlsplit(LOGIN_URL).scheme, urlsplit(LOGIN_URL).netloc)
+            and parsed.path.rstrip("/").lower() == "/profile/home"
+        ):
+            try:
+                await page.get_by_text(re.compile(r"^Forbrug$", re.I)).click(timeout=5000)
+                _LOGGER.info("Opened Forbrug to obtain the portal API token")
+            except PlaywrightError:
+                _LOGGER.info("Could not open Forbrug; leaving the portal for the owner")
+            return
+        await asyncio.sleep(0.5)
+
+
+async def wait_for_portal_token(renewer: Renewer, page: Page) -> str:
+    """Capture a portal token while handling its post-login landing page."""
+    navigation = asyncio.create_task(open_consumption_when_ready(page))
+    try:
+        return await renewer.tokens.get()
+    finally:
+        navigation.cancel()
+        with suppress(asyncio.CancelledError):
+            await navigation
+
+
 class HomeAssistant:
     """Minimal Home Assistant REST client."""
 
@@ -267,18 +364,24 @@ async def main() -> None:
         while True:
             token = await renewer.renew_silently()
             if token is None:
-                _LOGGER.info("Waiting for a login in noVNC")
-                if not notified:
-                    await ha.ask_for_login()
-                    notified = True
                 await page.goto(LOGIN_URL)
+                if renewer.tokens.empty():
+                    await try_saved_login(page)
                 try:
-                    # A token from the portal after a human login.
-                    token = await asyncio.wait_for(
-                        renewer.tokens.get(), timeout=_seconds_until_next_run()
-                    )
+                    # Portal tokens are captured by the response listener.
+                    token = await asyncio.wait_for(wait_for_portal_token(renewer, page), timeout=30)
                 except asyncio.TimeoutError:
-                    continue
+                    _LOGGER.info("Waiting for a login in noVNC")
+                    if not notified:
+                        await ha.ask_for_login()
+                        notified = True
+                    try:
+                        token = await asyncio.wait_for(
+                            wait_for_portal_token(renewer, page),
+                            timeout=_seconds_until_next_run(),
+                        )
+                    except asyncio.TimeoutError:
+                        continue
 
             await save_cookies(context)
             if await ha.send_token(token):
