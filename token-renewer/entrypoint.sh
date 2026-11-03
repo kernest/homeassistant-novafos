@@ -3,6 +3,8 @@ set -eu
 
 : "${VNC_PASSWORD:?Set VNC_PASSWORD: noVNC shows a browser logged in to KMD}"
 
+# A container restart keeps /tmp, including the lock of the previous Xvfb.
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 Xvfb :99 -screen 0 1280x900x24 -nolisten tcp &
 sleep 1
 

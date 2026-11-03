@@ -6,6 +6,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/*
 
+# The image ships the browsers, not the Python package; match its version.
+RUN python -m pip install --no-cache-dir --break-system-packages playwright==1.49.0
+
 WORKDIR /app
 COPY renew.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
