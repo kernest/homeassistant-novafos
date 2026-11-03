@@ -88,8 +88,10 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         # And for the one that creates the extra unit statistics.
         self._details_reconciled = False
         # Set once the stored cooling statistics have been checked against
-        # COOLING_FILTER_VERSION on this run.
+        # COOLING_FILTER_VERSION on this run, and while a clear waits for the
+        # full import that refills them.
         self._cooling_filter_checked = False
+        self._cooling_filter_pending = False
         # This year's and the latest day's cooling report, for the sensors.
         self.cooling_summary: dict | None = None
         # The full history import makes one KMD request per day and meter and
@@ -192,6 +194,11 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                     await async_import_grouped_statistics(self.hass, self.api)
                 data = (self.api._meter_data, meter_year_data)
             self.async_set_updated_data(data)
+            if self._cooling_filter_pending:
+                await self._cooling_store().async_save(
+                    {"filter": COOLING_FILTER_VERSION}
+                )
+                self._cooling_filter_pending = False
             _LOGGER.info("Full KMD history reconciliation finished")
         except asyncio.CancelledError:
             raise
@@ -650,19 +657,23 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
                 statistics,
             )
 
+    def _cooling_store(self) -> Store:
+        return Store(self.hass, 1, f"{DOMAIN}.{self.entry.entry_id}.cooling")
+
     async def _clear_unfiltered_cooling(self) -> bool:
         """Clear cooling statistics imported before the low flow filter.
 
         Re-importing only overwrites the hours it imports, so hours an older
         version stored and the current one skips would stay.  Returns True
         when the statistics were cleared and need a full import.  The clear
-        is queued in the recorder ahead of that import.
+        is queued in the recorder ahead of that import, and the filter
+        version is stored only once the import has finished, so a restart in
+        between clears and imports again.
         """
         if self._cooling_filter_checked:
             return False
         self._cooling_filter_checked = True
-        store = Store(self.hass, 1, f"{DOMAIN}.{self.entry.entry_id}.cooling")
-        saved = await store.async_load() or {}
+        saved = await self._cooling_store().async_load() or {}
         if saved.get("filter") == COOLING_FILTER_VERSION:
             return False
         _LOGGER.info(
@@ -672,7 +683,7 @@ class NovafosUpdateCoordinator(DataUpdateCoordinator):
         get_instance(self.hass).async_clear_statistics(
             [f"{DOMAIN}:heating_{key}" for key in COOLING_STATISTICS]
         )
-        await store.async_save({"filter": COOLING_FILTER_VERSION})
+        self._cooling_filter_pending = True
         return True
 
     async def _import_detail_unit(

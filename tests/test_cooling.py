@@ -1,5 +1,6 @@
 """Cooling report and extra meter unit tests."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -247,8 +248,8 @@ def make_coordinator(monkeypatch, api, sums):
             side_effect=lambda statistic_id, point: sums.get(statistic_id)
         ),
     )
-    coordinator._import_detail_unit = (
-        lambda *args: NovafosUpdateCoordinator._import_detail_unit(coordinator, *args)
+    coordinator._import_detail_unit = lambda *args: (
+        NovafosUpdateCoordinator._import_detail_unit(coordinator, *args)
     )
     return coordinator, added
 
@@ -393,7 +394,9 @@ def test_cooling_sensors():
 
 
 @pytest.mark.asyncio
-async def test_unfiltered_cooling_statistics_are_cleared_once(monkeypatch):
+async def test_unfiltered_cooling_statistics_are_cleared_until_reimported(
+    monkeypatch,
+):
     saved = {}
 
     class FakeStore:
@@ -410,25 +413,43 @@ async def test_unfiltered_cooling_statistics_are_cleared_once(monkeypatch):
     monkeypatch.setattr(coordinator_module, "Store", FakeStore)
     monkeypatch.setattr(coordinator_module, "get_instance", Mock(return_value=recorder))
 
-    def run(coordinator):
+    def start():
+        coordinator = SimpleNamespace(
+            hass=None,
+            api=SimpleNamespace(_meter_data={}),
+            entry=SimpleNamespace(entry_id="e1", options={}, data={}),
+            _cooling_filter_checked=False,
+            _cooling_filter_pending=False,
+            _import_lock=asyncio.Lock(),
+            _insert_statistics=AsyncMock(),
+            async_set_updated_data=Mock(),
+        )
+        coordinator._cooling_store = lambda: NovafosUpdateCoordinator._cooling_store(
+            coordinator
+        )
+        return coordinator
+
+    def clear(coordinator):
         return NovafosUpdateCoordinator._clear_unfiltered_cooling(coordinator)
 
-    first = SimpleNamespace(
-        hass=None, entry=SimpleNamespace(entry_id="e1"), _cooling_filter_checked=False
-    )
-    assert await run(first) is True
-    assert await run(first) is False
-    recorder.async_clear_statistics.assert_called_once()
+    first = start()
+    assert await clear(first) is True
+    assert await clear(first) is False
     cleared = recorder.async_clear_statistics.call_args.args[0]
     assert "novafos:heating_return_temperature" in cleared
     assert "novafos:heating_volume" not in cleared
 
-    # A later start finds the stored filter version and keeps the statistics.
-    later = SimpleNamespace(
-        hass=None, entry=SimpleNamespace(entry_id="e1"), _cooling_filter_checked=False
-    )
-    assert await run(later) is False
-    recorder.async_clear_statistics.assert_called_once()
+    # Restarted before the full import finished: clear and import again.
+    restarted = start()
+    assert await clear(restarted) is True
+    assert recorder.async_clear_statistics.call_count == 2
+    await NovafosUpdateCoordinator._run_full_history(restarted, {})
+    assert restarted._cooling_filter_pending is False
+
+    # Once the import has finished the statistics are kept.
+    later = start()
+    assert await clear(later) is False
+    assert recorder.async_clear_statistics.call_count == 2
 
 
 @pytest.mark.asyncio

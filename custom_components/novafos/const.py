@@ -89,8 +89,10 @@ COOLING_STATISTICS: Final = {
     "return_requirement": "required return temperature",
 }
 # Raise when the cooling hours imported change, so stored statistics are
-# cleared and imported again.  1: hours below 0.1 m³ are left out.
-COOLING_FILTER_VERSION: Final = 1
+# cleared and imported again.  1: hours below 0.1 m³ are left out.  2: the
+# same filter; 5.4.1 stored version 1 before the import had finished, so a
+# restart during that import left the history empty.
+COOLING_FILTER_VERSION: Final = 2
 
 
 # Optional static price per unit (for example DKK per m³), per meter type.
