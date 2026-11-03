@@ -27,6 +27,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 IDENTITY = os.environ.get("KMD_IDENTITY_URL", "https://easy-energy-identity.kmd.dk")
 AUTHORIZE_URL = f"{IDENTITY}/oidc/authorize"
@@ -45,6 +46,10 @@ PROFILE_DIR = DATA_DIR / "profile"
 # last human login.  Per-request values are regenerated on every renewal.
 AUTHORIZE_FILE = DATA_DIR / "authorize.json"
 PER_REQUEST = {"state", "nonce", "code_challenge", "code_challenge_method"}
+# KMD's login session is a session cookie, which Chromium drops when it
+# restarts.  It is saved here after each login or renewal and restored at start.
+COOKIES_FILE = DATA_DIR / "cookies.json"
+HA_TIMEOUT = int(os.environ.get("HA_TIMEOUT_SECONDS", "600")) * 1000
 
 NOTIFICATION_ID = "novafos_token_renewer"
 
@@ -174,11 +179,19 @@ class HomeAssistant:
         self.request = request
 
     async def call(self, domain: str, service: str, data: dict) -> bool:
-        response = await self.request.post(
-            f"{HA_URL}/api/services/{domain}/{service}",
-            headers={"Authorization": f"Bearer {HA_TOKEN}"},
-            data=data,
-        )
+        # update_token returns only after the integration's data refresh,
+        # which can take minutes.  A failure must not end the process: a
+        # restart loses KMD's session cookie.
+        try:
+            response = await self.request.post(
+                f"{HA_URL}/api/services/{domain}/{service}",
+                headers={"Authorization": f"Bearer {HA_TOKEN}"},
+                data=data,
+                timeout=HA_TIMEOUT,
+            )
+        except PlaywrightError as err:
+            _LOGGER.error("Home Assistant %s.%s failed: %s", domain, service, err)
+            return False
         if not response.ok:
             _LOGGER.error(
                 "Home Assistant %s.%s failed: HTTP %s", domain, service, response.status
@@ -219,6 +232,21 @@ class HomeAssistant:
         )
 
 
+async def save_cookies(context: BrowserContext) -> None:
+    """Keep the session cookies across restarts.  Readable by the owner only."""
+    COOKIES_FILE.touch(mode=0o600)
+    COOKIES_FILE.write_text(json.dumps(await context.cookies()))
+
+
+async def restore_cookies(context: BrowserContext) -> None:
+    if not COOKIES_FILE.exists():
+        return
+    try:
+        await context.add_cookies(json.loads(COOKIES_FILE.read_text()))
+    except (ValueError, PlaywrightError) as err:
+        _LOGGER.warning("Could not restore saved cookies: %s", err)
+
+
 async def main() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
@@ -230,6 +258,7 @@ async def main() -> None:
             viewport={"width": 1280, "height": 860},
             locale="da-DK",
         )
+        await restore_cookies(context)
         ha = HomeAssistant(await playwright.request.new_context())
         renewer = Renewer(context, ha)
         page = context.pages[0] if context.pages else await context.new_page()
@@ -251,6 +280,7 @@ async def main() -> None:
                 except asyncio.TimeoutError:
                     continue
 
+            await save_cookies(context)
             if await ha.send_token(token):
                 _LOGGER.info("Sent a new token to Home Assistant")
                 if notified:
