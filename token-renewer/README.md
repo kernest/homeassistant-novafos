@@ -55,6 +55,7 @@ running it.
 | `VNC_PASSWORD` | required | Password for the noVNC page |
 | `NOVNC_URL` | | Link shown in the Home Assistant notification |
 | `RENEW_INTERVAL_MINUTES` | `180` | Time between renewals. Each token triggers a 31-day refresh of about 60 KMD requests, so more often than hourly is rarely useful |
+| `RENEW_AT` | | Fixed daily renewal time in local time, for example `06:00`. Overrides `RENEW_INTERVAL_MINUTES`. A KMD session that expires within a day then needs a new login each day |
 | `TZ` | | Must match Home Assistant's time zone; the integration checks the token timestamp against its local clock |
 
 ## Security

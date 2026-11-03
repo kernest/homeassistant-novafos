@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
@@ -37,6 +37,8 @@ HA_URL = os.environ["HA_URL"].rstrip("/")
 HA_TOKEN = os.environ["HA_TOKEN"]
 NOVNC_URL = os.environ.get("NOVNC_URL", "the noVNC page of the token renewer")
 INTERVAL = int(os.environ.get("RENEW_INTERVAL_MINUTES", "180")) * 60
+# Optional fixed daily renewal time ("HH:MM", local time).  Overrides the interval.
+RENEW_AT = os.environ.get("RENEW_AT", "").strip()
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 PROFILE_DIR = DATA_DIR / "profile"
 # Parameters of the portal's own authorization request, recorded from the
@@ -55,6 +57,18 @@ _LOGGER = logging.getLogger("novafos-token-renewer")
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _seconds_until_next_run() -> float:
+    """Seconds until the next renewal: RENEW_AT if set, otherwise INTERVAL."""
+    if not RENEW_AT:
+        return INTERVAL
+    hour, minute = (int(part) for part in RENEW_AT.split(":"))
+    now = datetime.now()
+    run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if run <= now:
+        run += timedelta(days=1)
+    return (run - now).total_seconds()
 
 
 class Renewer:
@@ -231,7 +245,9 @@ async def main() -> None:
                 await page.goto(LOGIN_URL)
                 try:
                     # A token from the portal after a human login.
-                    token = await asyncio.wait_for(renewer.tokens.get(), timeout=INTERVAL)
+                    token = await asyncio.wait_for(
+                        renewer.tokens.get(), timeout=_seconds_until_next_run()
+                    )
                 except asyncio.TimeoutError:
                     continue
 
@@ -244,7 +260,7 @@ async def main() -> None:
             while not renewer.tokens.empty():
                 renewer.tokens.get_nowait()
             await page.goto("about:blank")
-            await asyncio.sleep(INTERVAL)
+            await asyncio.sleep(_seconds_until_next_run())
 
 
 if __name__ == "__main__":
