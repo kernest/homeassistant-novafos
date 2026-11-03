@@ -111,7 +111,8 @@ There is a thread on the forum as well: https://community.home-assistant.io/t/hi
 ## Automatic renewal with the token renewer (recommended)
 
 The [`token-renewer`](token-renewer/README.md) Docker service keeps a browser
-logged in to KMD and sends a fresh token to Home Assistant every few hours.
+logged in to KMD and sends a fresh token to Home Assistant every few hours, or
+once a day at a fixed time (`RENEW_AT`).
 You log in once through noVNC, solving the reCAPTCHA yourself, and again only
 when KMD's login session expires; Home Assistant notifies you when that
 happens. No HTTPS, CORS or browser extension is needed.

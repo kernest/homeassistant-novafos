@@ -12,6 +12,7 @@ services:
       VNC_PASSWORD: "${VNC_PASSWORD}"
       NOVNC_URL: "http://docker-host:6080/vnc.html"
       RENEW_INTERVAL_MINUTES: "180"
+      # RENEW_AT: "06:00"                # renew once a day at this local time instead
       TZ: "Europe/Copenhagen"            # must match Home Assistant's time zone
     ports:
       - "6080:6080"                      # noVNC, for the occasional login
