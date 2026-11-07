@@ -662,3 +662,40 @@ async def test_sum_before_reads_the_imported_unit(async_setup_recorder_instance,
         coordinator, statistic_id, point, {"energy": "MWh"}
     )
     assert imported == pytest.approx(11.28)
+
+
+@pytest.mark.asyncio
+async def test_token_service_survives_entries_changing_and_persists_token():
+    """A refresh that adds/removes an entry must not break the loop (HTTP 500)."""
+    store = {}
+
+    async def refresh_and_mutate():
+        store.pop("entry-1", None)
+        store["late-entry"] = {"coordinator": SimpleNamespace(async_refresh=AsyncMock())}
+
+    first = SimpleNamespace(async_refresh=AsyncMock(side_effect=refresh_and_mutate))
+    second = SimpleNamespace(async_refresh=AsyncMock())
+    store.update({"entry-0": {"coordinator": first}, "entry-1": {"coordinator": second}})
+    entries = {
+        key: SimpleNamespace(entry_id=key, options={"use_grouped_sensors": False})
+        for key in ("entry-0", "entry-1")
+    }
+    config_entries = Mock()
+    config_entries.async_get_entry.side_effect = entries.get
+    services = Mock()
+    services.has_service.return_value = False
+    hass = SimpleNamespace(services=services, config_entries=config_entries, data={DOMAIN: store})
+    await async_setup_services(hass, first)
+    handler = services.async_register.call_args.args[2]
+    await handler(
+        SimpleNamespace(data={"access_token": "tok", "access_token_date_updated": "2026-11-07T22:00:00"})
+    )
+    first.async_refresh.assert_awaited_once()
+    second.async_refresh.assert_awaited_once()
+    saved = [c.kwargs["options"] for c in config_entries.async_update_entry.call_args_list]
+    assert saved and all(
+        o["access_token"] == "tok"
+        and o["access_token_date_updated"] == "2026-11-07T22:00:00"
+        and o["use_grouped_sensors"] is False
+        for o in saved
+    )

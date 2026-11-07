@@ -42,6 +42,15 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     )
     # Ensure the coordinator picks up the updated token/options
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    token = entry.options.get("access_token", "")
+    if (
+        token
+        and getattr(coordinator, "access_token", None) == token
+        and getattr(coordinator, "access_token_date_updated", None)
+        == entry.options.get("access_token_date_updated", "")
+    ):
+        # Token persisted by the update_token action, which refreshes itself.
+        return
     # Update coordinator local copies from the stored entry options
     coordinator.access_token = entry.options.get("access_token", "")
     coordinator.access_token_date_updated = entry.options.get(

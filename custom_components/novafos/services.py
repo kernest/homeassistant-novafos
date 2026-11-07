@@ -42,10 +42,28 @@ async def async_setup_services(hass: HomeAssistant, coordinator: DataUpdateCoord
         updated = call.data["access_token_date_updated"] or datetime.now().strftime(
             "%Y-%m-%dT%H:%M:%S"
         )
-        for runtime in entries.values():
+        # Snapshot: hass.data[DOMAIN] can change while a refresh is awaited
+        # (another entry loading/unloading), which raised "dictionary keys
+        # changed during iteration" and returned HTTP 500 to the renewer.
+        for entry_id, runtime in list(entries.items()):
             entry_coordinator = runtime["coordinator"]
             entry_coordinator.access_token = call.data["access_token"]
             entry_coordinator.access_token_date_updated = updated
+            # Persist the token so a Home Assistant restart within its
+            # lifetime does not fall back to the expired one in options.
+            # update_listener sees the coordinator already holds it and
+            # does not schedule a second refresh.
+            config_entries = getattr(hass, "config_entries", None)
+            entry = config_entries.async_get_entry(entry_id) if config_entries else None
+            if entry is not None:
+                config_entries.async_update_entry(
+                    entry,
+                    options={
+                        **entry.options,
+                        "access_token": call.data["access_token"],
+                        "access_token_date_updated": updated,
+                    },
+                )
             await entry_coordinator.async_refresh()
 
     # Add service to receive a login token
