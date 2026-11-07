@@ -54,6 +54,9 @@ PER_REQUEST = {"state", "nonce", "code_challenge", "code_challenge_method"}
 COOKIES_FILE = DATA_DIR / "cookies.json"
 AUTO_LOGIN = os.environ.get("AUTO_LOGIN_SAVED_CREDENTIALS", "true").lower() == "true"
 HA_TIMEOUT = int(os.environ.get("HA_TIMEOUT_SECONDS", "600")) * 1000
+# Attach to an already running Chrome (e.g. http://127.0.0.1:9222) instead of
+# launching Playwright's Chromium with PROFILE_DIR.
+CDP_URL = os.environ.get("BROWSER_CDP_URL", "").strip()
 
 NOTIFICATION_ID = "novafos_token_renewer"
 
@@ -344,17 +347,38 @@ async def restore_cookies(context: BrowserContext) -> None:
         _LOGGER.warning("Could not restore saved cookies: %s", err)
 
 
+async def connect_to_running_chrome(playwright) -> BrowserContext:
+    """Attach to an ordinary Chrome started separately with its own profile.
+
+    Some KMD logins are rejected from Playwright's bundled Chromium. A regular
+    Chrome with its sandbox intact, launched by the host and listening for
+    DevTools on loopback only, keeps the browser-saved login and is accepted.
+    """
+    for attempt in range(10):
+        try:
+            browser = await playwright.chromium.connect_over_cdp(CDP_URL, timeout=2000)
+            break
+        except PlaywrightError:
+            if attempt == 9:
+                raise
+            await asyncio.sleep(1)
+    return browser.contexts[0]
+
+
 async def main() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            # Shown on the virtual display served by noVNC; HEADLESS=1 is
-            # for testing only.
-            headless=os.environ.get("HEADLESS") == "1",
-            viewport={"width": 1280, "height": 860},
-            locale="da-DK",
-        )
+        if CDP_URL:
+            context = await connect_to_running_chrome(playwright)
+        else:
+            context = await playwright.chromium.launch_persistent_context(
+                str(PROFILE_DIR),
+                # Shown on the virtual display served by noVNC; HEADLESS=1 is
+                # for testing only.
+                headless=os.environ.get("HEADLESS") == "1",
+                viewport={"width": 1280, "height": 860},
+                locale="da-DK",
+            )
         await restore_cookies(context)
         ha = HomeAssistant(await playwright.request.new_context())
         renewer = Renewer(context, ha)
